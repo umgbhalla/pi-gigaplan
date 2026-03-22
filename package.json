@@ -1,0 +1,43 @@
+{
+  "name": "@umgbhalla/pi-gigaplan",
+  "version": "0.1.0",
+  "description": "Structured AI planning with cross-model critique — gigaplan as a pi extension",
+  "keywords": ["pi-package", "pi-extension", "gigaplan", "planning", "orchestration"],
+  "license": "MIT",
+  "author": "umgbhalla",
+  "type": "module",
+  "homepage": "https://github.com/umgbhalla/pi-gigaplan#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/umgbhalla/pi-gigaplan"
+  },
+  "files": [
+    "extensions",
+    "skills",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0",
+    "typescript": "^5.0.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"]
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
