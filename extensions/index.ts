@@ -43,7 +43,7 @@ import {
   activePlanDirs,
   resolvePlanDir,
   loadPlan,
-  saveState,
+  savePlanState,
   latestPlanRecord,
   latestPlanPath,
   latestPlanMetaPath,
@@ -173,7 +173,7 @@ function initPlan(
     last_evaluation: {},
   };
 
-  saveState(planDir, state);
+  savePlanState(planDir, state);
   saveFlagRegistry(planDir, { flags: [] });
 
   return { planDir, state };
@@ -202,7 +202,7 @@ function processStepOutput(
         duration_ms: durationMs,
         result: "success",
       });
-      saveState(planDir, state);
+      savePlanState(planDir, state);
       return {
         success: true,
         step: "clarify",
@@ -264,7 +264,7 @@ function processStepOutput(
         result: "success",
         output_file: planFile,
       });
-      saveState(planDir, state);
+      savePlanState(planDir, state);
 
       return {
         success: true,
@@ -324,7 +324,7 @@ function processStepOutput(
         output_file: critiqueFile,
         flags_count: newFlags.length,
       });
-      saveState(planDir, state);
+      savePlanState(planDir, state);
 
       return {
         success: true,
@@ -345,7 +345,7 @@ function processStepOutput(
         result: "success",
         output_file: "execution.json",
       });
-      saveState(planDir, state);
+      savePlanState(planDir, state);
 
       return {
         success: true,
@@ -366,7 +366,7 @@ function processStepOutput(
         result: "success",
         output_file: "review.json",
       });
-      saveState(planDir, state);
+      savePlanState(planDir, state);
 
       const criteria = (payload.criteria as Array<{ name: string; pass: boolean }>) ?? [];
       const passed = criteria.filter((c) => c.pass).length;
@@ -405,7 +405,7 @@ function runEvaluate(planDir: string, state: PlanState): StepResult {
     (evaluation.signals as Record<string, unknown>).weighted_score as number,
   ];
 
-  state.last_evaluation = evaluation;
+  state.last_evaluation = evaluation as unknown as Record<string, unknown>;
   state.current_state = STATE_EVALUATED;
   state.history.push({
     step: "evaluate",
@@ -414,13 +414,13 @@ function runEvaluate(planDir: string, state: PlanState): StepResult {
     recommendation: evaluation.recommendation,
     output_file: evalFile,
   });
-  saveState(planDir, state);
+  savePlanState(planDir, state);
 
   return {
     success: true,
     step: "evaluate",
     summary: `Evaluation: ${evaluation.recommendation} (${evaluation.confidence} confidence). ${evaluation.rationale}`,
-    nextSteps: evaluation.valid_next_steps,
+    nextSteps: evaluation.valid_next_steps ?? [],
     artifacts: [evalFile],
   };
 }
@@ -470,7 +470,7 @@ function runGate(planDir: string, state: PlanState): StepResult {
     timestamp: nowUtc(),
     result: passed ? "success" : "failed",
   });
-  saveState(planDir, state);
+  savePlanState(planDir, state);
 
   return {
     success: passed,
@@ -492,7 +492,8 @@ export default function gigaplanExtension(pi: ExtensionAPI) {
   // Widget state
   let activePlan: { name: string; state: string; step: string } | null = null;
 
-  function updateWidget(ctx: any) {
+  function updateWidget(ctx?: any) {
+    if (!ctx?.ui) return;
     if (!activePlan) {
       ctx.ui.setStatus("gigaplan", "");
       return;
@@ -514,11 +515,14 @@ export default function gigaplanExtension(pi: ExtensionAPI) {
       }
 
       // Ask for configuration
-      const robustness = await ctx.ui.select("Robustness level", [
-        { label: "Light — pragmatic, fast", value: "light" },
-        { label: "Standard — balanced (default)", value: "standard" },
-        { label: "Thorough — exhaustive review", value: "thorough" },
-      ]);
+      const ROBUSTNESS_OPTIONS = ["Light — pragmatic, fast", "Standard — balanced (default)", "Thorough — exhaustive review"];
+      const ROBUSTNESS_MAP: Record<string, string> = {
+        [ROBUSTNESS_OPTIONS[0]]: "light",
+        [ROBUSTNESS_OPTIONS[1]]: "standard",
+        [ROBUSTNESS_OPTIONS[2]]: "thorough",
+      };
+      const robustnessChoice = await ctx.ui.select("Robustness level", ROBUSTNESS_OPTIONS);
+      const robustness = ROBUSTNESS_MAP[robustnessChoice ?? ""] ?? "standard";
 
       const autoApprove = await ctx.ui.confirm(
         "Auto-approve?",
@@ -528,14 +532,14 @@ export default function gigaplanExtension(pi: ExtensionAPI) {
       // Initialize
       const root = ctx.cwd;
       const { planDir, state } = initPlan(root, idea, {
-        robustness: robustness ?? "standard",
+        robustness,
         autoApprove,
       });
 
       activePlan = { name: state.name, state: state.current_state, step: "clarify" };
       updateWidget(ctx);
 
-      ctx.ui.notify(`Plan "${state.name}" initialized. Starting orchestration...`, "success");
+      ctx.ui.notify(`Plan "${state.name}" initialized. Starting orchestration...`, "info");
 
       // Send orchestration prompt to the LLM
       const orchestrationPrompt = `You are now in **gigaplan mode**. A structured plan has been initialized.
@@ -613,7 +617,7 @@ Start now with the **clarify** step.`;
       } catch (e) {
         return {
           content: [{ type: "text", text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
-          details: { error: true },
+          details: { error: true } as any,
         };
       }
     },
@@ -633,7 +637,7 @@ Start now with the **clarify** step.`;
       durationMs: Type.Optional(Type.Number({ description: "How long the step took in ms" })),
     }),
 
-    async execute(_id, params) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       try {
         const state = readJson(path.join(params.planDir, "state.json")) as PlanState;
         let result: StepResult;
@@ -659,7 +663,7 @@ Start now with the **clarify** step.`;
         if (activePlan) {
           activePlan.state = result.step;
           activePlan.step = result.nextSteps[0] ?? "done";
-          updateWidget(null as any); // TODO: need ctx
+          updateWidget(ctx);
         }
 
         const nextAction = result.nextSteps.length > 0
@@ -682,7 +686,7 @@ Start now with the **clarify** step.`;
       } catch (e) {
         return {
           content: [{ type: "text", text: `Error advancing: ${e instanceof Error ? e.message : String(e)}` }],
-          details: { error: true },
+          details: { error: true } as any,
         };
       }
     },
@@ -789,14 +793,14 @@ Start now with the **clarify** step.`;
               timestamp: nowUtc(),
               message: `add-note: ${params.note}`,
             });
-            saveState(params.planDir, state);
+            savePlanState(params.planDir, state);
             return { content: [{ type: "text", text: `Note added. Continue with the current step.` }], details: {} };
           }
 
           case "abort": {
             state.current_state = STATE_ABORTED;
             state.history.push({ step: "override", timestamp: nowUtc(), message: "aborted" });
-            saveState(params.planDir, state);
+            savePlanState(params.planDir, state);
             return { content: [{ type: "text", text: `Plan "${state.name}" aborted.` }], details: {} };
           }
 
@@ -808,10 +812,10 @@ Start now with the **clarify** step.`;
               timestamp: nowUtc(),
               message: "force-proceed (bypassed gate)",
             });
-            saveState(params.planDir, state);
+            savePlanState(params.planDir, state);
             return {
               content: [{ type: "text", text: "Force-proceeded to gate. Next step: execute." }],
-              details: { nextSteps: ["execute"] },
+              details: { nextSteps: ["execute"] } as any,
             };
           }
 
@@ -823,10 +827,10 @@ Start now with the **clarify** step.`;
               timestamp: nowUtc(),
               message: "skip (user override to SKIP)",
             });
-            saveState(params.planDir, state);
+            savePlanState(params.planDir, state);
             return {
               content: [{ type: "text", text: "Skipped to gate. Next step: gate." }],
-              details: { nextSteps: ["gate"] },
+              details: { nextSteps: ["gate"] } as any,
             };
           }
 
@@ -839,7 +843,7 @@ Start now with the **clarify** step.`;
       } catch (e) {
         return {
           content: [{ type: "text", text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
-          details: { error: true },
+          details: { error: true } as any,
         };
       }
     },

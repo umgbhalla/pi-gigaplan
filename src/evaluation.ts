@@ -270,7 +270,7 @@ export function buildEvaluation(planDir: string, state: PlanState): EvaluationRe
   const robustness = configuredRobustness(state);
   const skipThreshold = ROBUSTNESS_SKIP_THRESHOLDS[robustness] ?? 2.0;
   const stagnationFactor = ROBUSTNESS_STAGNATION_FACTORS[robustness] ?? 0.9;
-  const openScopeCreep = scopeCreepFlags(flagRegistry, FLAG_BLOCKING_STATUSES);
+  const openScopeCreep = scopeCreepFlags(flagRegistry, { statuses: FLAG_BLOCKING_STATUSES });
   const significantCount = flagRegistry.flags.filter(
     (f) => f.severity === "significant" && f.status !== "verified",
   ).length;

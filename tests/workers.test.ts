@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { validatePayload, buildSubagentTask, parseStepOutput } from "../src/workers.js";
@@ -38,6 +38,16 @@ describe("validatePayload", () => {
     } catch (e) {
       expect((e as Error).message).toContain("plan");
     }
+  });
+
+  it("rejects wrong top-level types with a clear error", () => {
+    const payload = { plan: [], questions: [], success_criteria: [], assumptions: [] };
+    expect(() => validatePayload("plan", payload as any)).toThrow(/plan must be a string, got array/);
+  });
+
+  it("rejects wrong nested item types with a clear error", () => {
+    const payload = { plan: "ok", questions: [123], success_criteria: [], assumptions: [] };
+    expect(() => validatePayload("plan", payload as any)).toThrow(/questions\[0\] must be a string, got number/);
   });
 
   it("does nothing for unknown step", () => {

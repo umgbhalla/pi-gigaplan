@@ -40,7 +40,7 @@ For **evaluate** and **gate** steps: skip the subagent, just call `gigaplan_adva
 ```
 clarify → plan → critique → evaluate
                                 ↓
-              CONTINUE → integrate → plan (loop)
+              CONTINUE → integrate → critique (loop)
               SKIP → gate → execute → review → done
               ESCALATE → ask user → override
               ABORT → done

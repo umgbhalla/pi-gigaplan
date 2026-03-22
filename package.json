@@ -1,6 +1,6 @@
 {
   "name": "@umgbhalla/pi-gigaplan",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Structured AI planning with cross-model critique — gigaplan as a pi extension",
   "keywords": [
     "pi-package",

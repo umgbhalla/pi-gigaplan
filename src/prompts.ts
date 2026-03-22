@@ -4,7 +4,8 @@ import * as fs from "fs";
 import * as path from "path";
 import {
   PlanState,
-  CliError,
+  FlagRecord,
+  GigaplanError,
   latestPlanPath,
   readJson,
   latestPlanMetaPath,
@@ -23,7 +24,7 @@ function clarifyPrompt(state: PlanState, planDir: string): string {
   const notes = state.meta?.notes ?? [];
   const notesBlock =
     notes.length > 0
-      ? notes.map((n: { note: string }) => `- ${n.note}`).join("\n")
+      ? notes.map((n: Record<string, unknown>) => `- ${n.note}`).join("\n")
       : "- None";
   return `
 You are a planning assistant. The user has proposed the following idea:
@@ -52,7 +53,7 @@ function planPrompt(state: PlanState, planDir: string): string {
   const notes = state.meta?.notes ?? [];
   const notesBlock =
     notes.length > 0
-      ? notes.map((n: { note: string }) => `- ${n.note}`).join("\n")
+      ? notes.map((n: Record<string, unknown>) => `- ${n.note}`).join("\n")
       : "- None";
   const clarification = state.clarification ?? {};
   const refined = clarification.refined_idea ?? "";
@@ -103,7 +104,7 @@ function integratePrompt(state: PlanState, planDir: string): string {
   );
   const evaluation = readJson(evaluatePath);
   const unresolved = unresolvedSignificantFlags(flagRegistry);
-  const openFlags = unresolved.map((flag: Record<string, unknown>) => ({
+  const openFlags = unresolved.map((flag) => ({
     id: flag.id,
     severity: flag.severity,
     status: flag.status,
@@ -151,10 +152,10 @@ function critiquePrompt(state: PlanState, planDir: string): string {
   const flagRegistry = loadFlagRegistry(planDir);
   const robustness = configuredRobustness(state);
   const unresolved = flagRegistry.flags
-    .filter((flag: Record<string, unknown>) =>
+    .filter((flag) =>
       ["addressed", "open", "disputed"].includes(flag.status as string)
     )
-    .map((flag: Record<string, unknown>) => ({
+    .map((flag) => ({
       id: flag.id,
       concern: flag.concern,
       status: flag.status,
@@ -255,7 +256,7 @@ function reviewClaudePrompt(state: PlanState, planDir: string): string {
   const latestMeta = readJson(latestPlanMetaPath(planDir, state));
   const execution = readJson(path.join(planDir, "execution.json"));
   const gate = readJson(path.join(planDir, "gate.json"));
-  const diffSummary = collectGitDiffSummary(projectDir);
+  const diffSummary = collectGitDiffSummary(projectDir ?? process.cwd());
   return `
 Review the execution critically against user intent and observable success criteria.
 
@@ -294,7 +295,7 @@ function reviewCodexPrompt(state: PlanState, planDir: string): string {
   );
   const latestMeta = readJson(latestPlanMetaPath(planDir, state));
   const execution = readJson(path.join(planDir, "execution.json"));
-  const diffSummary = collectGitDiffSummary(projectDir);
+  const diffSummary = collectGitDiffSummary(projectDir ?? process.cwd());
   return `
 Review the implementation against the success criteria.
 
@@ -358,7 +359,7 @@ export function createPrompt(
     agent === "codex" ? CODEX_PROMPT_BUILDERS : CLAUDE_PROMPT_BUILDERS;
   const builder = builders[step];
   if (!builder) {
-    throw new CliError(
+    throw new GigaplanError(
       "unsupported_step",
       `Unsupported ${agent} step '${step}'`
     );

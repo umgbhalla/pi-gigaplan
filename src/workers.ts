@@ -60,6 +60,82 @@ function getRequiredKeys(step: string): string[] {
   return (schema?.required as string[] | undefined) ?? [];
 }
 
+function getStepSchema(step: string): Record<string, unknown> | undefined {
+  const filename = STEP_SCHEMA_FILENAMES[step];
+  if (!filename) return undefined;
+  return SCHEMAS[filename] as Record<string, unknown> | undefined;
+}
+
+function describeType(value: unknown): string {
+  if (Array.isArray(value)) return "array";
+  if (value === null) return "null";
+  return typeof value;
+}
+
+function validateValueAgainstSchema(
+  value: unknown,
+  schema: Record<string, unknown> | undefined,
+  keyPath: string,
+): void {
+  if (!schema) return;
+
+  const expectedType = schema.type as string | undefined;
+  if (expectedType === "string" && typeof value !== "string") {
+    throw new GigaplanError(
+      "parse_error",
+      `${keyPath} must be a string, got ${describeType(value)}`,
+    );
+  }
+  if (expectedType === "boolean" && typeof value !== "boolean") {
+    throw new GigaplanError(
+      "parse_error",
+      `${keyPath} must be a boolean, got ${describeType(value)}`,
+    );
+  }
+  if (expectedType === "array") {
+    if (!Array.isArray(value)) {
+      throw new GigaplanError(
+        "parse_error",
+        `${keyPath} must be an array, got ${describeType(value)}`,
+      );
+    }
+    const itemSchema = schema.items as Record<string, unknown> | undefined;
+    value.forEach((item, index) => {
+      validateValueAgainstSchema(item, itemSchema, `${keyPath}[${index}]`);
+    });
+    return;
+  }
+  if (expectedType === "object") {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new GigaplanError(
+        "parse_error",
+        `${keyPath} must be an object, got ${describeType(value)}`,
+      );
+    }
+
+    const obj = value as Record<string, unknown>;
+    const required = (schema.required as string[] | undefined) ?? [];
+    const missing = required.filter((k) => !(k in obj));
+    if (missing.length > 0) {
+      throw new GigaplanError(
+        "parse_error",
+        `${keyPath} missing required keys: ${missing.join(", ")}`,
+      );
+    }
+
+    const properties = (schema.properties as Record<string, unknown> | undefined) ?? {};
+    for (const [prop, propSchema] of Object.entries(properties)) {
+      if (prop in obj) {
+        validateValueAgainstSchema(
+          obj[prop],
+          propSchema as Record<string, unknown>,
+          keyPath === "payload" ? prop : `${keyPath}.${prop}`,
+        );
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
@@ -73,6 +149,8 @@ export function validatePayload(step: string, payload: Record<string, unknown>):
       `${step} output missing required keys: ${missing.join(", ")}`,
     );
   }
+
+  validateValueAgainstSchema(payload, getStepSchema(step), "payload");
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +182,44 @@ export function resolveAgent(step: string, state: PlanState): AgentRouting {
 // Build subagent task
 // ---------------------------------------------------------------------------
 
+function stepOutputChecklist(step: string): string {
+  switch (step) {
+    case "clarify":
+      return [
+        '- Top-level keys: `questions`, `refined_idea`, `intent_summary`.',
+        '- `questions` must be an array of objects with `question` and `context`.',
+      ].join("\n");
+    case "plan":
+      return [
+        '- Top-level keys: `plan`, `questions`, `success_criteria`, `assumptions`.',
+        '- `plan` must be a markdown string, not an array or object.',
+      ].join("\n");
+    case "integrate":
+      return [
+        '- Top-level keys: `plan`, `changes_summary`, `flags_addressed`, `assumptions`, `success_criteria`, `questions`.',
+        '- `plan` must be a markdown string.',
+        '- `flags_addressed` must contain exact flag IDs from critique.',
+      ].join("\n");
+    case "critique":
+      return [
+        '- Top-level keys: `flags`, `verified_flag_ids`, `disputed_flag_ids`.',
+        '- Use `flags`, not `significant_issues` or any alternate field name.',
+        '- Each `flags[]` item must include exactly: `id`, `concern`, `category`, `severity_hint`, `evidence`.',
+      ].join("\n");
+    case "execute":
+      return [
+        '- Top-level keys: `output`, `files_changed`, `commands_run`, `deviations`.',
+      ].join("\n");
+    case "review":
+      return [
+        '- Top-level keys: `criteria`, `issues`, `summary`.',
+        '- Each `criteria[]` item must include `name`, `pass`, `evidence`.',
+      ].join("\n");
+    default:
+      return "- Follow the schema exactly.";
+  }
+}
+
 /**
  * Build the full task prompt for a subagent.
  * Includes the step prompt + instructions to write structured output.
@@ -130,6 +246,9 @@ ${prompt}
 
 You MUST write your response as a valid JSON object to this file:
 \`${outputPath}\`
+
+Checklist:
+${stepOutputChecklist(step)}
 
 The JSON must conform to this schema:
 \`\`\`json
