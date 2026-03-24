@@ -255,7 +255,7 @@ The JSON must conform to this schema:
 ${JSON.stringify(strict, null, 2)}
 \`\`\`
 
-Use the \`write\` tool to write the JSON file. Do NOT include any text outside the JSON object.
+Write the JSON file directly to the target path. Use the \`write\` tool when it is available; otherwise use \`bash\` (for example a heredoc or short Python snippet) to create the file. Do NOT include any text outside the JSON object.
 Do NOT wrap in markdown code fences in the file — write raw JSON only.
 
 After writing the output file, you are done. Call subagent_done to exit.`;

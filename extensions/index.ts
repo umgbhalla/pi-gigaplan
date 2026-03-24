@@ -96,6 +96,11 @@ function inferNextSteps(state: PlanState): string[] {
     case STATE_PLANNED: return ["critique"];
     case STATE_CRITIQUED: return ["evaluate"];
     case STATE_EVALUATED: {
+      const lastHistory = state.history[state.history.length - 1];
+      if (lastHistory?.step === "gate" && lastHistory.result === "failed") {
+        return ["integrate"];
+      }
+
       const rec = (state.last_evaluation as Record<string, unknown>)?.recommendation as string;
       if (rec === "CONTINUE") return ["integrate"];
       if (rec === "SKIP") return ["gate"];
@@ -105,6 +110,19 @@ function inferNextSteps(state: PlanState): string[] {
     case STATE_GATED: return ["execute"];
     case STATE_EXECUTED: return ["review"];
     default: return [];
+  }
+}
+
+const LLM_STEPS = new Set(["clarify", "plan", "critique", "integrate", "execute", "review"]);
+const LOGIC_STEPS = new Set(["evaluate", "gate"]);
+
+function requireAllowedStep(state: PlanState, step: string): void {
+  const nextSteps = inferNextSteps(state);
+  if (!nextSteps.includes(step)) {
+    throw new GigaplanError(
+      "invalid_state",
+      `Step "${step}" is not valid from state ${state.current_state}. Expected next step: ${nextSteps.join(", ") || "none"}`,
+    );
   }
 }
 
@@ -194,6 +212,7 @@ function processStepOutput(
 
   switch (step) {
     case "clarify": {
+      requireState(state, STATE_INITIALIZED);
       state.clarification = payload;
       state.current_state = STATE_CLARIFIED;
       state.history.push({
@@ -214,6 +233,9 @@ function processStepOutput(
 
     case "plan":
     case "integrate": {
+      if (step === "plan") requireState(state, STATE_CLARIFIED);
+      else requireState(state, STATE_EVALUATED);
+
       const newIteration = iteration + 1;
       state.iteration = newIteration;
 
@@ -276,6 +298,8 @@ function processStepOutput(
     }
 
     case "critique": {
+      requireState(state, STATE_PLANNED);
+
       // Save critique artifact
       const critiqueFile = `critique_v${iteration}.json`;
       atomicWriteJson(path.join(planDir, critiqueFile), payload);
@@ -336,6 +360,7 @@ function processStepOutput(
     }
 
     case "execute": {
+      requireState(state, STATE_GATED);
       atomicWriteJson(path.join(planDir, "execution.json"), payload);
       state.current_state = STATE_EXECUTED;
       state.history.push({
@@ -357,6 +382,7 @@ function processStepOutput(
     }
 
     case "review": {
+      requireState(state, STATE_EXECUTED);
       atomicWriteJson(path.join(planDir, "review.json"), payload);
       state.current_state = STATE_DONE;
       state.history.push({
@@ -492,10 +518,27 @@ export default function gigaplanExtension(pi: ExtensionAPI) {
   // Widget state
   let activePlan: { name: string; state: string; step: string } | null = null;
 
+  function syncActivePlan(root: string): void {
+    try {
+      const [, state] = loadPlan(root);
+      if (TERMINAL_STATES.has(state.current_state)) {
+        activePlan = null;
+        return;
+      }
+      activePlan = {
+        name: state.name,
+        state: state.current_state,
+        step: inferNextSteps(state)[0] ?? "done",
+      };
+    } catch {
+      activePlan = null;
+    }
+  }
+
   function updateWidget(ctx?: any) {
     if (!ctx?.ui) return;
     if (!activePlan) {
-      ctx.ui.setStatus("gigaplan", "");
+      ctx.ui.setStatus("gigaplan", undefined);
       return;
     }
     ctx.ui.setStatus(
@@ -503,6 +546,21 @@ export default function gigaplanExtension(pi: ExtensionAPI) {
       `📋 ${activePlan.name} [${activePlan.state}] → ${activePlan.step}`,
     );
   }
+
+  pi.on("session_start", (_event, ctx) => {
+    syncActivePlan(ctx.cwd);
+    updateWidget(ctx);
+  });
+
+  pi.on("session_switch", (_event, ctx) => {
+    syncActivePlan(ctx.cwd);
+    updateWidget(ctx);
+  });
+
+  pi.on("session_shutdown", (_event, ctx) => {
+    activePlan = null;
+    updateWidget(ctx);
+  });
 
   // ── /gigaplan command ──
   pi.registerCommand("gigaplan", {
@@ -572,7 +630,7 @@ For each LLM step, use the \`gigaplan_step\` tool which returns the subagent con
 
 Start now with the **clarify** step.`;
 
-      pi.sendUserMessage(orchestrationPrompt);
+      pi.sendUserMessage(orchestrationPrompt, { deliverAs: "followUp" });
     },
   });
 
@@ -591,6 +649,10 @@ Start now with the **clarify** step.`;
     async execute(_id, params) {
       try {
         const state = readJson(path.join(params.planDir, "state.json")) as PlanState;
+        if (!LLM_STEPS.has(params.step)) {
+          throw new GigaplanError("unsupported_step", `Unknown LLM step: ${params.step}`);
+        }
+        requireAllowedStep(state, params.step);
         const config = buildStepConfig(params.step, state, params.planDir);
 
         return {
@@ -640,6 +702,11 @@ Start now with the **clarify** step.`;
     async execute(_id, params, _signal, _onUpdate, ctx) {
       try {
         const state = readJson(path.join(params.planDir, "state.json")) as PlanState;
+        if (!LLM_STEPS.has(params.step) && !LOGIC_STEPS.has(params.step)) {
+          throw new GigaplanError("unsupported_step", `Unknown step: ${params.step}`);
+        }
+        requireAllowedStep(state, params.step);
+
         let result: StepResult;
 
         if (params.step === "evaluate") {
@@ -805,6 +872,7 @@ Start now with the **clarify** step.`;
           }
 
           case "force-proceed": {
+            requireState(state, STATE_EVALUATED);
             state.current_state = STATE_GATED;
             state.meta.user_approved_gate = true;
             state.history.push({
@@ -820,6 +888,7 @@ Start now with the **clarify** step.`;
           }
 
           case "skip": {
+            requireState(state, STATE_EVALUATED);
             state.last_evaluation = { recommendation: "SKIP" };
             state.current_state = STATE_EVALUATED;
             state.history.push({

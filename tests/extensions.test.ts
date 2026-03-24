@@ -7,21 +7,27 @@ import gigaplanExtension from "../extensions/index.js";
 function createExtensionHarness() {
   const tools = new Map<string, any>();
   const commands = new Map<string, any>();
-  const sentMessages: string[] = [];
+  const eventHandlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+  const sentMessages: Array<{ message: string; options?: { deliverAs?: string } }> = [];
 
   gigaplanExtension({
+    on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
+      const handlers = eventHandlers.get(event) ?? [];
+      handlers.push(handler);
+      eventHandlers.set(event, handlers);
+    },
     registerTool(tool: any) {
       tools.set(tool.name, tool);
     },
     registerCommand(name: string, command: any) {
       commands.set(name, command);
     },
-    sendUserMessage(message: string) {
-      sentMessages.push(message);
+    sendUserMessage(message: string, options?: { deliverAs?: string }) {
+      sentMessages.push({ message, options });
     },
   } as any);
 
-  return { tools, commands, sentMessages };
+  return { tools, commands, eventHandlers, sentMessages };
 }
 
 async function initPlan(root: string) {
@@ -55,6 +61,33 @@ describe("gigaplan orchestration", () => {
 
   afterEach(() => {
     fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("restores active plan status on session_start", async () => {
+    const { eventHandlers, planDir } = await initPlan(root);
+    const setStatusCalls: Array<{ key: string; text: string | undefined }> = [];
+
+    fs.writeFileSync(
+      path.join(planDir, "state.json"),
+      JSON.stringify({
+        ...JSON.parse(fs.readFileSync(path.join(planDir, "state.json"), "utf8")),
+        current_state: "planned",
+      }, null, 2),
+    );
+
+    const sessionStart = eventHandlers.get("session_start")?.[0];
+    expect(sessionStart).toBeTruthy();
+    await sessionStart?.({}, {
+      cwd: root,
+      ui: {
+        setStatus(key: string, text: string | undefined) {
+          setStatusCalls.push({ key, text });
+        },
+      },
+    });
+
+    expect(setStatusCalls.at(-1)?.key).toBe("gigaplan");
+    expect(setStatusCalls.at(-1)?.text).toContain("→ critique");
   });
 
   it("does not crash when called without ctx.ui after a plan was initialized", async () => {
@@ -108,11 +141,34 @@ describe("gigaplan orchestration", () => {
     expect(task).toContain("Use `flags`, not `significant_issues`");
   });
 
+  it("rejects out-of-order steps before mutating plan state", async () => {
+    const { tools, planDir } = await initPlan(root);
+
+    fs.writeFileSync(
+      path.join(planDir, "plan_output.json"),
+      JSON.stringify({
+        plan: "# Plan\n\nImplement the daemon.",
+        questions: [],
+        success_criteria: ["Daemon starts"],
+        assumptions: ["Linux host"],
+      }, null, 2),
+    );
+
+    const stepResult = await tools.get("gigaplan_step").execute("test", { planDir, step: "plan" });
+    expect(stepResult.details?.error).toBe(true);
+    expect(stepResult.content[0].text).toContain('Step "plan" is not valid from state initialized');
+
+    const advanceResult = await tools.get("gigaplan_advance").execute("test", { planDir, step: "plan" });
+    expect(advanceResult.details?.error).toBe(true);
+    expect(advanceResult.content[0].text).toContain('Step "plan" is not valid from state initialized');
+  });
+
   it("advances through clarify, plan, critique, evaluate, and gate with expected next steps", async () => {
     const { tools, planDir, sentMessages } = await initPlan(root);
     const advance = tools.get("gigaplan_advance");
 
-    expect(sentMessages[0]).toContain("Start now with the **clarify** step.");
+    expect(sentMessages[0]?.message).toContain("Start now with the **clarify** step.");
+    expect(sentMessages[0]?.options?.deliverAs).toBe("followUp");
 
     fs.writeFileSync(
       path.join(planDir, "clarify_output.json"),
@@ -153,5 +209,57 @@ describe("gigaplan orchestration", () => {
 
     const gate = await advance.execute("test", { planDir, step: "gate" });
     expect(gate.details?.nextSteps).toEqual(["execute"]);
+  });
+
+  it("routes failed gate checks back to integrate", async () => {
+    const { tools, planDir } = await initPlan(root);
+    const advance = tools.get("gigaplan_advance");
+    const stepTool = tools.get("gigaplan_step");
+
+    fs.writeFileSync(
+      path.join(planDir, "clarify_output.json"),
+      JSON.stringify({
+        questions: [],
+        refined_idea: "Build a deployable daemon",
+        intent_summary: "Build a deployable daemon",
+      }, null, 2),
+    );
+    await advance.execute("test", { planDir, step: "clarify" });
+
+    fs.writeFileSync(
+      path.join(planDir, "plan_output.json"),
+      JSON.stringify({
+        plan: "# Plan\n\nImplement the daemon.",
+        questions: [],
+        success_criteria: [],
+        assumptions: ["Linux host"],
+      }, null, 2),
+    );
+    await advance.execute("test", { planDir, step: "plan" });
+
+    fs.writeFileSync(
+      path.join(planDir, "critique_output.json"),
+      JSON.stringify({
+        flags: [],
+        verified_flag_ids: [],
+        disputed_flag_ids: [],
+      }, null, 2),
+    );
+    await advance.execute("test", { planDir, step: "critique" });
+    await advance.execute("test", { planDir, step: "evaluate" });
+
+    const gate = await advance.execute("test", { planDir, step: "gate" });
+    expect(gate.details?.nextSteps).toEqual(["integrate"]);
+
+    const integrateStep = await stepTool.execute("test", { planDir, step: "integrate" });
+    expect(integrateStep.details?.error).toBeFalsy();
+  });
+
+  it("rejects skip override before evaluation", async () => {
+    const { tools, planDir } = await initPlan(root);
+    const result = await tools.get("gigaplan_override").execute("test", { planDir, action: "skip" });
+
+    expect(result.details?.error).toBe(true);
+    expect(result.content[0].text).toContain("Expected state evaluated");
   });
 });
