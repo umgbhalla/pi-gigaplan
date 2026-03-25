@@ -134,6 +134,35 @@ describe("gigaplan orchestration", () => {
     expect(result.details?.step).toBe("clarify");
   });
 
+  it("updates the widget with the persisted plan state after advancing", async () => {
+    const { tools, planDir } = await initPlan(root);
+    const setStatusCalls: Array<{ key: string; text: string | undefined }> = [];
+
+    fs.writeFileSync(
+      path.join(planDir, "clarify_output.json"),
+      JSON.stringify({
+        questions: [],
+        refined_idea: "Build a deployable daemon",
+        intent_summary: "Build a deployable daemon",
+      }, null, 2),
+    );
+
+    const advance = tools.get("gigaplan_advance");
+    const result = await advance.execute("test", { planDir, step: "clarify" }, undefined, undefined, {
+      cwd: root,
+      ui: {
+        setStatus(key: string, text: string | undefined) {
+          setStatusCalls.push({ key, text });
+        },
+      },
+    });
+
+    expect(result.details?.error).toBeFalsy();
+    expect(setStatusCalls.at(-1)?.key).toBe("gigaplan");
+    expect(setStatusCalls.at(-1)?.text).toContain("[clarified] → plan");
+    expect(setStatusCalls.at(-1)?.text).not.toContain("[clarify]");
+  });
+
   it("guides critique subagents toward the required flags schema", async () => {
     const { tools, planDir } = await initPlan(root);
     const stepTool = tools.get("gigaplan_step");

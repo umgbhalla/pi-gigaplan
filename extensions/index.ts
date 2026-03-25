@@ -1029,12 +1029,11 @@ Start now with the **clarify** step.`;
           );
         }
 
-        // Update widget
-        if (activePlan) {
-          activePlan.state = result.step;
-          activePlan.step = result.nextSteps[0] ?? "done";
-          updateWidget(ctx);
-        }
+        // Update widget from persisted plan state so it reflects the real state,
+        // not just the step that most recently ran.
+        const widgetRoot = ctx?.cwd ?? state.config.project_dir ?? process.cwd();
+        syncActivePlan(widgetRoot);
+        updateWidget(ctx);
 
         const nextAction = result.nextSteps.length > 0
           ? `\n\n**Next step(s):** ${result.nextSteps.join(", ")}`
