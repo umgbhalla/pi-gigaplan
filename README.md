@@ -43,6 +43,7 @@ For agent-driven startup, use `gigaplan_init` instead of trying to self-trigger 
 | Tool | Description |
 |------|-------------|
 | `gigaplan_init` | Initialize a plan directly, with optional orchestration follow-up |
+| `gigaplan_doctor` | Validate plan state, repair common JSON/output issues, and return recovery handoff |
 | `gigaplan_step` | Get subagent config for a step |
 | `gigaplan_advance` | Process output and advance state machine |
 | `gigaplan_status` | Show plan status |
@@ -74,3 +75,18 @@ Robustness levels control how strict the critique is:
 | **light** | Pragmatic. Only flags real failures. |
 | **standard** | Balanced judgment. Significant risks flagged. |
 | **thorough** | Exhaustive. Edge cases, performance, production concerns. |
+
+Current limitation: robustness affects critique/evaluation strictness only. It does not currently tune subagent verbosity, token budget, or throughput.
+
+## Recovery
+
+If `gigaplan_advance` fails because an output file is missing, malformed, or wrapped in extra prose, run:
+
+```ts
+gigaplan_doctor({ fix: true })
+```
+
+The doctor will:
+- validate plan state and required artifacts
+- repair common machine-parseable JSON output issues
+- return the next-step subagent config so orchestration can resume cleanly

@@ -59,6 +59,7 @@ import { buildEvaluation } from "../src/evaluation.js";
 import {
   buildStepConfig,
   parseStepOutput,
+  repairStepOutputFile,
   validatePayload,
   sessionKeyFor,
 } from "../src/workers.js";
@@ -632,6 +633,113 @@ Start now with the **clarify** step.`;
     };
   }
 
+  function diagnosePlan(root: string, requestedPlanName?: string, fix = false) {
+    ensureRuntimeLayout(root);
+    const planDir = resolvePlanDir(root, requestedPlanName);
+    const state = readJson(path.join(planDir, "state.json")) as PlanState;
+    const issues: string[] = [];
+    const fixes: string[] = [];
+    const nextSteps = inferNextSteps(state);
+    const nextStep = nextSteps[0] ?? null;
+
+    const configured = state.config.robustness;
+    if (configured && !VALID_ROBUSTNESS.has(configured)) {
+      issues.push(`Invalid robustness \`${configured}\` in state.json.`);
+      if (fix) {
+        state.config.robustness = "standard";
+        savePlanState(planDir, state);
+        fixes.push("Reset invalid robustness to `standard`.");
+      }
+    }
+
+    const requiredJsonFiles = ["state.json", "faults.json"];
+    for (const filename of requiredJsonFiles) {
+      const filePath = path.join(planDir, filename);
+      if (!fs.existsSync(filePath)) {
+        issues.push(`Missing required file: ${filename}`);
+      } else {
+        try {
+          readJson(filePath);
+        } catch (e) {
+          issues.push(`Malformed JSON in ${filename}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+
+    if (state.iteration > 0) {
+      const planFile = path.join(planDir, `plan_v${state.iteration}.md`);
+      const planMetaFile = path.join(planDir, `plan_v${state.iteration}.meta.json`);
+      if (!fs.existsSync(planFile)) {
+        issues.push(`Missing current plan file: ${path.basename(planFile)}`);
+      }
+      if (!fs.existsSync(planMetaFile)) {
+        issues.push(`Missing current plan metadata: ${path.basename(planMetaFile)}`);
+      } else {
+        try {
+          readJson(planMetaFile);
+        } catch (e) {
+          issues.push(`Malformed plan metadata JSON: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+
+    let nextStepConfig: Record<string, unknown> | null = null;
+    if (nextStep && LLM_STEPS.has(nextStep)) {
+      const outputPath = path.join(planDir, `${nextStep}_output.json`);
+      nextStepConfig = buildStepConfig(nextStep, state, planDir) as unknown as Record<string, unknown>;
+      if (fs.existsSync(outputPath)) {
+        try {
+          parseStepOutput(nextStep, outputPath);
+          if (fix) {
+            const repair = repairStepOutputFile(nextStep, outputPath);
+            if (repair.repaired) {
+              fixes.push(`Normalized ${nextStep}_output.json into valid canonical JSON.`);
+            }
+          }
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          issues.push(`Invalid ${nextStep} output JSON: ${message}`);
+          if (fix) {
+            try {
+              const repair = repairStepOutputFile(nextStep, outputPath);
+              fixes.push(
+                repair.repaired
+                  ? `Normalized ${nextStep}_output.json into valid canonical JSON.`
+                  : `${nextStep}_output.json was already machine-parseable; no rewrite needed.`,
+              );
+            } catch (repairError) {
+              issues.push(`Automatic repair failed for ${nextStep}_output.json: ${repairError instanceof Error ? repairError.message : String(repairError)}`);
+            }
+          }
+        }
+      }
+    }
+
+    if (nextStep === "evaluate") {
+      const critiqueFile = path.join(planDir, `critique_v${state.iteration}.json`);
+      if (!fs.existsSync(critiqueFile)) {
+        issues.push(`Cannot evaluate: missing ${path.basename(critiqueFile)}.`);
+      }
+    }
+
+    if (nextStep === "gate") {
+      const evaluationFile = path.join(planDir, `evaluation_v${state.iteration}.json`);
+      if (!fs.existsSync(evaluationFile)) {
+        issues.push(`Cannot gate: missing ${path.basename(evaluationFile)}.`);
+      }
+    }
+
+    return {
+      planDir,
+      state,
+      nextSteps,
+      nextStep,
+      issues,
+      fixes,
+      nextStepConfig,
+    };
+  }
+
   pi.on("session_start", (_event, ctx) => {
     syncActivePlan(ctx.cwd);
     updateWidget(ctx);
@@ -743,6 +851,86 @@ Start now with the **clarify** step.`;
       } catch (e) {
         return {
           content: [{ type: "text", text: `Error initializing gigaplan: ${e instanceof Error ? e.message : String(e)}` }],
+          details: { error: true } as any,
+        };
+      }
+    },
+  });
+
+  // ── /gigaplan-doctor command ──
+  pi.registerCommand("gigaplan-doctor", {
+    description: "Validate the active gigaplan and suggest or apply recoverable fixes",
+    handler: async (args, ctx) => {
+      try {
+        const requested = (args ?? "").trim() || undefined;
+        const result = diagnosePlan(ctx.cwd, requested, false);
+        const lines = [
+          `Plan: ${result.state.name}`,
+          `State: ${result.state.current_state}`,
+          `Robustness: ${result.state.config.robustness ?? "standard"}`,
+          `Next step: ${result.nextStep ?? "done"}`,
+          result.issues.length === 0 ? "Doctor: no problems detected." : `Doctor found ${result.issues.length} issue(s):`,
+          ...result.issues.map((issue) => `- ${issue}`),
+        ];
+        if (result.nextStepConfig) {
+          lines.push(`Recovery: regenerate subagent for \`${result.nextStep}\` via gigaplan_step or use doctor tool details.`);
+        }
+        ctx.ui.notify(result.issues.length === 0 ? "Gigaplan doctor: no issues found" : "Gigaplan doctor found issues", result.issues.length === 0 ? "info" : "warning");
+        pi.sendUserMessage(lines.join("\n"), { deliverAs: "followUp" });
+      } catch (e) {
+        ctx.ui.notify(`Gigaplan doctor failed: ${e instanceof Error ? e.message : String(e)}`, "error");
+      }
+    },
+  });
+
+  // ── gigaplan_doctor tool ──
+  pi.registerTool({
+    name: "gigaplan_doctor",
+    label: "Gigaplan Doctor",
+    description: "Validate the current gigaplan, detect broken/missing artifacts, and optionally apply safe repairs for common JSON/output issues.",
+    parameters: Type.Object({
+      planName: Type.Optional(Type.String({ description: "Specific plan name (optional)" })),
+      fix: Type.Optional(Type.Boolean({ description: "Apply safe repairs when possible" })),
+    }),
+
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      try {
+        const result = diagnosePlan(ctx.cwd, params.planName, params.fix ?? false);
+        const lines = [
+          `# Gigaplan Doctor`,
+          `**Plan:** ${result.state.name}`,
+          `**State:** ${result.state.current_state}`,
+          `**Robustness:** ${result.state.config.robustness ?? "standard"}`,
+          `**Next step:** ${result.nextStep ?? "done"}`,
+          `**Issues:** ${result.issues.length}`,
+        ];
+
+        if (result.issues.length > 0) {
+          lines.push("", "## Problems", ...result.issues.map((issue) => `- ${issue}`));
+        }
+        if (result.fixes.length > 0) {
+          lines.push("", "## Fixes applied", ...result.fixes.map((item) => `- ${item}`));
+        }
+        if (result.nextStepConfig) {
+          lines.push("", "## Recovery", `Next LLM step is **${result.nextStep}**.`, `Use the returned details to respawn that subagent.`);
+        }
+
+        return {
+          content: [{ type: "text", text: lines.join("\n") }],
+          details: {
+            planDir: result.planDir,
+            planName: result.state.name,
+            state: result.state.current_state,
+            nextSteps: result.nextSteps,
+            nextStep: result.nextStep,
+            issues: result.issues,
+            fixes: result.fixes,
+            nextStepConfig: result.nextStepConfig,
+          },
+        };
+      } catch (e) {
+        return {
+          content: [{ type: "text", text: `Error running doctor: ${e instanceof Error ? e.message : String(e)}` }],
           details: { error: true } as any,
         };
       }
@@ -866,9 +1054,13 @@ Start now with the **clarify** step.`;
           },
         };
       } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
         return {
-          content: [{ type: "text", text: `Error advancing: ${e instanceof Error ? e.message : String(e)}` }],
-          details: { error: true } as any,
+          content: [{
+            type: "text",
+            text: `Error advancing: ${message}\n\nRun \`gigaplan_doctor({ fix: true })\` to validate the plan, repair common JSON issues, and regenerate the next-step handoff.`,
+          }],
+          details: { error: true, doctorSuggested: true } as any,
         };
       }
     },

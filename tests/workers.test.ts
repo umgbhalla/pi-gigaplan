@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import * as path from "node:path";
 import * as fs from "node:fs";
-import { validatePayload, buildSubagentTask, parseStepOutput } from "../src/workers.js";
+import { validatePayload, buildSubagentTask, parseStepOutput, repairStepOutputFile } from "../src/workers.js";
 import { GigaplanError } from "../src/core.js";
 import type { PlanState } from "../src/core.js";
 
@@ -60,9 +60,7 @@ describe("buildSubagentTask", () => {
 
   beforeAll(() => {
     fs.mkdirSync(planDir, { recursive: true });
-    // Write a fake plan file since buildSubagentTask → createPrompt may read it
     fs.writeFileSync(path.join(planDir, "plan_v1.md"), "# Test Plan\n\nSome content.");
-    // Write fake state.json
     fs.writeFileSync(path.join(planDir, "state.json"), JSON.stringify(mockState, null, 2));
   });
 
@@ -112,6 +110,25 @@ describe("parseStepOutput", () => {
     fs.writeFileSync(tmpFile, fenced);
     const result = parseStepOutput("plan", tmpFile);
     expect(result["plan"]).toBe("fenced plan");
+    fs.unlinkSync(tmpFile);
+  });
+
+  it("extracts JSON from surrounding prose", () => {
+    const tmpFile = path.join("/tmp", `prose-test-${process.pid}.json`);
+    const payload = { plan: "embedded plan", questions: [], success_criteria: [], assumptions: [] };
+    fs.writeFileSync(tmpFile, `Here is the result:\n${JSON.stringify(payload, null, 2)}\nDone.`);
+    const result = parseStepOutput("plan", tmpFile);
+    expect(result["plan"]).toBe("embedded plan");
+    fs.unlinkSync(tmpFile);
+  });
+
+  it("repairs parseable but non-canonical output files", () => {
+    const tmpFile = path.join("/tmp", `repair-test-${process.pid}.json`);
+    const payload = { plan: "repair me", questions: [], success_criteria: [], assumptions: [] };
+    fs.writeFileSync(tmpFile, `Sure:\n\n${JSON.stringify(payload)}\nDone.`);
+    const result = repairStepOutputFile("plan", tmpFile);
+    expect(result.repaired).toBe(true);
+    expect(JSON.parse(fs.readFileSync(tmpFile, "utf8"))["plan"]).toBe("repair me");
     fs.unlinkSync(tmpFile);
   });
 });

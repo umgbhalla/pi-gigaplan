@@ -12,12 +12,14 @@ You are orchestrating a gigaplan — a structured planning loop with cross-model
 | Tool | Purpose |
 |------|---------|
 | `gigaplan_init` | Initialize a plan directly when the agent needs to self-start gigaplan |
+| `gigaplan_doctor` | Validate plan state, repair common JSON/output issues, and return recovery handoff |
 | `gigaplan_step` | Get subagent config for a step (task prompt, agent, output path) |
 | `gigaplan_advance` | Process step output and advance the state machine |
 | `gigaplan_status` | Check plan status |
 | `gigaplan_override` | Manual intervention (add-note, abort, force-proceed, skip) |
 
 Use `gigaplan_init` for self-started flows. Do not rely on `execute_command("/gigaplan ...")` for agent-driven initialization.
+If `gigaplan_advance` fails on malformed JSON or a broken handoff, run `gigaplan_doctor({ fix: true })` before retrying.
 
 ## Orchestration Loop
 

@@ -270,6 +270,72 @@ After writing the output file, you are done. Call subagent_done to exit.`;
 /**
  * Read and validate the structured output from a subagent.
  */
+function extractLikelyJsonObject(text: string): string | null {
+  const start = text.indexOf("{");
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === "{") depth += 1;
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(start, i + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+function parsePayloadFromText(text: string): Record<string, unknown> {
+  const attempts = [text.trim()];
+  const fenceMatch = text.match(/```(?:json)?\s*\n([\s\S]*?)\n```/);
+  if (fenceMatch?.[1]) attempts.push(fenceMatch[1].trim());
+  const extracted = extractLikelyJsonObject(text);
+  if (extracted) attempts.push(extracted.trim());
+
+  let lastError: unknown;
+  for (const candidate of attempts) {
+    if (!candidate) continue;
+    try {
+      const payload = JSON.parse(candidate);
+      if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+        throw new GigaplanError("parse_error", "Step output is not a JSON object");
+      }
+      return payload as Record<string, unknown>;
+    } catch (e) {
+      lastError = e;
+    }
+  }
+
+  throw new GigaplanError(
+    "parse_error",
+    `Step output is not valid JSON: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+  );
+}
+
 export function parseStepOutput(
   step: string,
   outputPath: string,
@@ -286,30 +352,27 @@ export function parseStepOutput(
     throw new GigaplanError("parse_error", `Step output file is empty: ${outputPath}`);
   }
 
-  // Try to parse — handle potential markdown fencing
-  let text = raw;
-  const fenceMatch = text.match(/```(?:json)?\s*\n([\s\S]*?)\n```/);
-  if (fenceMatch) {
-    text = fenceMatch[1];
-  }
-
-  let payload: unknown;
-  try {
-    payload = JSON.parse(text);
-  } catch (e) {
-    throw new GigaplanError(
-      "parse_error",
-      `Step output is not valid JSON: ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
-
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
-    throw new GigaplanError("parse_error", "Step output is not a JSON object");
-  }
-
-  const obj = payload as Record<string, unknown>;
+  const obj = parsePayloadFromText(raw);
   validatePayload(step, obj);
   return obj;
+}
+
+export function repairStepOutputFile(
+  step: string,
+  outputPath: string,
+): { repaired: boolean; payload: Record<string, unknown> } {
+  if (!fs.existsSync(outputPath)) {
+    throw new GigaplanError("parse_error", `Step output file was not created: ${outputPath}`);
+  }
+  const raw = fs.readFileSync(outputPath, "utf-8");
+  const payload = parsePayloadFromText(raw);
+  validatePayload(step, payload);
+  const normalized = JSON.stringify(payload, null, 2) + "\n";
+  const repaired = raw !== normalized;
+  if (repaired) {
+    fs.writeFileSync(outputPath, normalized, "utf8");
+  }
+  return { repaired, payload };
 }
 
 // ---------------------------------------------------------------------------

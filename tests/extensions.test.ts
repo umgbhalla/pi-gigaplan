@@ -280,6 +280,28 @@ describe("gigaplan orchestration", () => {
     expect(integrateStep.details?.error).toBeFalsy();
   });
 
+  it("doctor repairs parseable next-step output and returns recovery config", async () => {
+    const { tools, planDir } = await initPlan(root);
+
+    fs.writeFileSync(
+      path.join(planDir, "clarify_output.json"),
+      `Here is the output:\n${JSON.stringify({
+        questions: [],
+        refined_idea: "Build a deployable daemon",
+        intent_summary: "Build a deployable daemon",
+      })}\nDone.`,
+    );
+
+    const doctor = await tools.get("gigaplan_doctor").execute("test", { fix: true }, undefined, undefined, { cwd: root });
+    expect(doctor.details?.issues.length).toBe(0);
+    expect(doctor.details?.fixes[0]).toContain("clarify_output.json");
+    expect(doctor.details?.nextStep).toBe("clarify");
+    expect(doctor.details?.nextStepConfig?.outputPath).toContain("clarify_output.json");
+
+    const normalized = JSON.parse(fs.readFileSync(path.join(planDir, "clarify_output.json"), "utf8"));
+    expect(normalized.intent_summary).toBe("Build a deployable daemon");
+  });
+
   it("rejects skip override before evaluation", async () => {
     const { tools, planDir } = await initPlan(root);
     const result = await tools.get("gigaplan_override").execute("test", { planDir, action: "skip" });
