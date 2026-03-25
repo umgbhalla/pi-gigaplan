@@ -513,6 +513,14 @@ function runGate(planDir: string, state: PlanState): StepResult {
 // Extension
 // ---------------------------------------------------------------------------
 
+const ROBUSTNESS_OPTIONS = ["Light — pragmatic, fast", "Standard — balanced (default)", "Thorough — exhaustive review"] as const;
+const ROBUSTNESS_MAP: Record<string, string> = {
+  [ROBUSTNESS_OPTIONS[0]]: "light",
+  [ROBUSTNESS_OPTIONS[1]]: "standard",
+  [ROBUSTNESS_OPTIONS[2]]: "thorough",
+};
+const VALID_ROBUSTNESS = new Set(["light", "standard", "thorough"]);
+
 export default function gigaplanExtension(pi: ExtensionAPI) {
 
   // Widget state
@@ -547,6 +555,83 @@ export default function gigaplanExtension(pi: ExtensionAPI) {
     );
   }
 
+  function buildOrchestrationPrompt(args: {
+    idea: string;
+    planDir: string;
+    state: PlanState;
+    robustness: string;
+    autoApprove: boolean;
+  }): string {
+    return `You are now in **gigaplan mode**. A structured plan has been initialized.
+
+## Plan: ${args.state.name}
+- **Idea:** ${args.idea}
+- **Robustness:** ${args.robustness}
+- **Auto-approve:** ${args.autoApprove}
+- **Plan directory:** ${args.planDir}
+
+## Workflow
+
+Execute each step by spawning a subagent using the \`subagent\` tool. After each subagent completes, use the \`gigaplan_advance\` tool to process the output and advance the state machine.
+
+### Steps (in order):
+1. **clarify** → Spawn subagent to clarify the idea
+2. **plan** → Spawn subagent to create implementation plan
+3. **critique** → Spawn subagent (different model!) to independently critique
+4. **evaluate** → Use \`gigaplan_advance\` with step="evaluate" (no subagent needed)
+5. Based on evaluation:
+   - CONTINUE → **integrate** (spawn subagent to revise plan) → back to critique
+   - SKIP → **gate** (use \`gigaplan_advance\` with step="gate")
+   - ESCALATE → Ask user for override decision
+   - ABORT → Stop
+6. After gate passes: **execute** → Spawn subagent to implement
+7. **review** → Spawn subagent to validate
+
+### Subagent spawning pattern:
+For each LLM step, use the \`gigaplan_step\` tool which returns the subagent config, then spawn it.
+
+Start now with the **clarify** step.`;
+  }
+
+  function initializeGigaplan(
+    root: string,
+    idea: string,
+    options: {
+      name?: string;
+      maxIterations?: number;
+      budgetUsd?: number;
+      autoApprove?: boolean;
+      robustness?: string;
+    },
+    ctx?: any,
+  ) {
+    const robustness = options.robustness ?? "standard";
+    const autoApprove = options.autoApprove ?? false;
+    const { planDir, state } = initPlan(root, idea, {
+      ...options,
+      robustness,
+      autoApprove,
+    });
+
+    activePlan = { name: state.name, state: state.current_state, step: "clarify" };
+    updateWidget(ctx);
+    ctx?.ui?.notify?.(`Plan "${state.name}" initialized. Starting orchestration...`, "info");
+
+    return {
+      planDir,
+      state,
+      robustness,
+      autoApprove,
+      orchestrationPrompt: buildOrchestrationPrompt({
+        idea,
+        planDir,
+        state,
+        robustness,
+        autoApprove,
+      }),
+    };
+  }
+
   pi.on("session_start", (_event, ctx) => {
     syncActivePlan(ctx.cwd);
     updateWidget(ctx);
@@ -572,14 +657,7 @@ export default function gigaplanExtension(pi: ExtensionAPI) {
         return;
       }
 
-      // Ask for configuration
-      const ROBUSTNESS_OPTIONS = ["Light — pragmatic, fast", "Standard — balanced (default)", "Thorough — exhaustive review"];
-      const ROBUSTNESS_MAP: Record<string, string> = {
-        [ROBUSTNESS_OPTIONS[0]]: "light",
-        [ROBUSTNESS_OPTIONS[1]]: "standard",
-        [ROBUSTNESS_OPTIONS[2]]: "thorough",
-      };
-      const robustnessChoice = await ctx.ui.select("Robustness level", ROBUSTNESS_OPTIONS);
+      const robustnessChoice = await ctx.ui.select("Robustness level", [...ROBUSTNESS_OPTIONS]);
       const robustness = ROBUSTNESS_MAP[robustnessChoice ?? ""] ?? "standard";
 
       const autoApprove = await ctx.ui.confirm(
@@ -587,50 +665,87 @@ export default function gigaplanExtension(pi: ExtensionAPI) {
         "Skip manual gate approval and auto-advance through all steps?",
       );
 
-      // Initialize
-      const root = ctx.cwd;
-      const { planDir, state } = initPlan(root, idea, {
-        robustness,
-        autoApprove,
-      });
-
-      activePlan = { name: state.name, state: state.current_state, step: "clarify" };
-      updateWidget(ctx);
-
-      ctx.ui.notify(`Plan "${state.name}" initialized. Starting orchestration...`, "info");
-
-      // Send orchestration prompt to the LLM
-      const orchestrationPrompt = `You are now in **gigaplan mode**. A structured plan has been initialized.
-
-## Plan: ${state.name}
-- **Idea:** ${idea}
-- **Robustness:** ${robustness}
-- **Auto-approve:** ${autoApprove}
-- **Plan directory:** ${planDir}
-
-## Workflow
-
-Execute each step by spawning a subagent using the \`subagent\` tool. After each subagent completes, use the \`gigaplan_advance\` tool to process the output and advance the state machine.
-
-### Steps (in order):
-1. **clarify** → Spawn subagent to clarify the idea
-2. **plan** → Spawn subagent to create implementation plan
-3. **critique** → Spawn subagent (different model!) to independently critique
-4. **evaluate** → Use \`gigaplan_advance\` with step="evaluate" (no subagent needed)
-5. Based on evaluation:
-   - CONTINUE → **integrate** (spawn subagent to revise plan) → back to critique
-   - SKIP → **gate** (use \`gigaplan_advance\` with step="gate")
-   - ESCALATE → Ask user for override decision
-   - ABORT → Stop
-6. After gate passes: **execute** → Spawn subagent to implement
-7. **review** → Spawn subagent to validate
-
-### Subagent spawning pattern:
-For each LLM step, use the \`gigaplan_step\` tool which returns the subagent config, then spawn it.
-
-Start now with the **clarify** step.`;
+      const { orchestrationPrompt } = initializeGigaplan(
+        ctx.cwd,
+        idea,
+        { robustness, autoApprove },
+        ctx,
+      );
 
       pi.sendUserMessage(orchestrationPrompt, { deliverAs: "followUp" });
+    },
+  });
+
+  // ── gigaplan_init tool — initialize a plan without slash-command UI ──
+  pi.registerTool({
+    name: "gigaplan_init",
+    label: "Gigaplan Init",
+    description:
+      "Initialize a gigaplan directly from a tool call. Use this when the agent needs to self-start " +
+      "a plan without relying on /gigaplan or interactive command UI. Optionally queues the orchestration prompt.",
+    parameters: Type.Object({
+      idea: Type.String({ description: "What to build" }),
+      name: Type.Optional(Type.String({ description: "Optional explicit plan name" })),
+      maxIterations: Type.Optional(Type.Number({ description: "Maximum critique/integrate iterations" })),
+      budgetUsd: Type.Optional(Type.Number({ description: "Budget cap in USD" })),
+      autoApprove: Type.Optional(Type.Boolean({ description: "Skip manual gate approval" })),
+      robustness: Type.Optional(Type.String({ description: "light, standard, or thorough" })),
+      startOrchestration: Type.Optional(Type.Boolean({ description: "Queue the follow-up orchestration prompt (default: true)" })),
+    }),
+
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      try {
+        const idea = params.idea.trim();
+        if (!idea) {
+          throw new GigaplanError("missing_idea", "idea is required");
+        }
+
+        const robustness = params.robustness ?? "standard";
+        if (!VALID_ROBUSTNESS.has(robustness)) {
+          throw new GigaplanError("invalid_robustness", `Invalid robustness: ${robustness}`);
+        }
+
+        const { planDir, state, orchestrationPrompt, autoApprove: resolvedAutoApprove } = initializeGigaplan(
+          ctx.cwd,
+          idea,
+          {
+            name: params.name,
+            maxIterations: params.maxIterations,
+            budgetUsd: params.budgetUsd,
+            autoApprove: params.autoApprove,
+            robustness,
+          },
+          ctx,
+        );
+
+        const startOrchestration = params.startOrchestration ?? true;
+        if (startOrchestration) {
+          pi.sendUserMessage(orchestrationPrompt, { deliverAs: "followUp" });
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text:
+              `Initialized plan **${state.name}** at \`${planDir}\`.` +
+              (startOrchestration ? " Orchestration prompt queued." : " Orchestration prompt not queued."),
+          }],
+          details: {
+            planDir,
+            planName: state.name,
+            idea,
+            robustness,
+            autoApprove: resolvedAutoApprove,
+            nextStep: "clarify",
+            promptQueued: startOrchestration,
+          },
+        };
+      } catch (e) {
+        return {
+          content: [{ type: "text", text: `Error initializing gigaplan: ${e instanceof Error ? e.message : String(e)}` }],
+          details: { error: true } as any,
+        };
+      }
     },
   });
 

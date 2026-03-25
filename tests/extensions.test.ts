@@ -63,6 +63,31 @@ describe("gigaplan orchestration", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  it("initializes via tool for self-started agent flows", async () => {
+    const harness = createExtensionHarness();
+    const init = harness.tools.get("gigaplan_init");
+    expect(init).toBeTruthy();
+
+    const result = await init.execute("test", {
+      idea: "Build a deployable daemon",
+      autoApprove: true,
+      robustness: "standard",
+    }, undefined, undefined, {
+      cwd: root,
+      ui: {
+        notify: () => {},
+        setStatus: () => {},
+      },
+    });
+
+    expect(result.details?.error).toBeFalsy();
+    expect(result.details?.planName).toBe("build-a-deployable-daemon");
+    expect(result.details?.promptQueued).toBe(true);
+    expect(harness.sentMessages[0]?.message).toContain("Start now with the **clarify** step.");
+    expect(harness.sentMessages[0]?.options?.deliverAs).toBe("followUp");
+    expect(fs.existsSync(path.join(root, ".gigaplan", "plans", "build-a-deployable-daemon", "state.json"))).toBe(true);
+  });
+
   it("restores active plan status on session_start", async () => {
     const { eventHandlers, planDir } = await initPlan(root);
     const setStatusCalls: Array<{ key: string; text: string | undefined }> = [];

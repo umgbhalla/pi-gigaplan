@@ -36,10 +36,13 @@ This will:
 4. Pause at gate for your approval (unless auto-approve)
 5. Execute and review
 
+For agent-driven startup, use `gigaplan_init` instead of trying to self-trigger `/gigaplan` through `execute_command`.
+
 ## Tools
 
 | Tool | Description |
 |------|-------------|
+| `gigaplan_init` | Initialize a plan directly, with optional orchestration follow-up |
 | `gigaplan_step` | Get subagent config for a step |
 | `gigaplan_advance` | Process output and advance state machine |
 | `gigaplan_status` | Show plan status |
