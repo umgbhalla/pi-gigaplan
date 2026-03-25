@@ -199,7 +199,7 @@ function initPlan(
 }
 
 /**
- * Process a step's output after a subagent completes.
+ * Process a step's output after an agent completes.
  * Updates state, saves artifacts, advances the state machine.
  */
 function processStepOutput(
@@ -573,23 +573,31 @@ export default function gigaplanExtension(pi: ExtensionAPI) {
 
 ## Workflow
 
-Execute each step by spawning a subagent using the \`subagent\` tool. After each subagent completes, use the \`gigaplan_advance\` tool to process the output and advance the state machine.
+Execute each step by spawning agents using \`agent_group\`. After each group completes, use \`gigaplan_advance\` to process the output and advance the state machine.
 
 ### Steps (in order):
-1. **clarify** → Spawn subagent to clarify the idea
-2. **plan** → Spawn subagent to create implementation plan
-3. **critique** → Spawn subagent (different model!) to independently critique
-4. **evaluate** → Use \`gigaplan_advance\` with step="evaluate" (no subagent needed)
+1. **clarify** → Spawn agent to clarify the idea
+2. **plan** → Spawn agent to create implementation plan
+3. **critique** → Spawn agent (different model!) to independently critique
+4. **evaluate** → Use \`gigaplan_advance\` with step="evaluate" (no agent needed)
 5. Based on evaluation:
-   - CONTINUE → **integrate** (spawn subagent to revise plan) → back to critique
+   - CONTINUE → **integrate** (spawn agent to revise plan) → back to critique
    - SKIP → **gate** (use \`gigaplan_advance\` with step="gate")
    - ESCALATE → Ask user for override decision
    - ABORT → Stop
-6. After gate passes: **execute** → Spawn subagent to implement
-7. **review** → Spawn subagent to validate
+6. After gate passes: **execute** → Spawn agent to implement
+7. **review** → Spawn agent to validate
 
-### Subagent spawning pattern:
-For each LLM step, use the \`gigaplan_step\` tool which returns the subagent config, then spawn it.
+### Agent spawning pattern:
+For each LLM step, use \`gigaplan_step\` to get the agent config, then spawn it via \`agent_group\` with \`wait: true\`:
+
+\`\`\`typescript
+agent_group({
+  name: "Gigaplan: <step>",
+  wait: true,
+  agents: [{ name: "<step config name>", agent: "<step config agent>", task: "<step config task>" }]
+})
+\`\`\`
 
 Start now with the **clarify** step.`;
   }
@@ -873,7 +881,7 @@ Start now with the **clarify** step.`;
           ...result.issues.map((issue) => `- ${issue}`),
         ];
         if (result.nextStepConfig) {
-          lines.push(`Recovery: regenerate subagent for \`${result.nextStep}\` via gigaplan_step or use doctor tool details.`);
+          lines.push(`Recovery: regenerate agent for \`${result.nextStep}\` via gigaplan_step or use doctor tool details.`);
         }
         ctx.ui.notify(result.issues.length === 0 ? "Gigaplan doctor: no issues found" : "Gigaplan doctor found issues", result.issues.length === 0 ? "info" : "warning");
         pi.sendUserMessage(lines.join("\n"), { deliverAs: "followUp" });
@@ -912,7 +920,7 @@ Start now with the **clarify** step.`;
           lines.push("", "## Fixes applied", ...result.fixes.map((item) => `- ${item}`));
         }
         if (result.nextStepConfig) {
-          lines.push("", "## Recovery", `Next LLM step is **${result.nextStep}**.`, `Use the returned details to respawn that subagent.`);
+          lines.push("", "## Recovery", `Next LLM step is **${result.nextStep}**.`, `Use the returned details to respawn that agent.`);
         }
 
         return {
@@ -937,13 +945,13 @@ Start now with the **clarify** step.`;
     },
   });
 
-  // ── gigaplan_step tool — get subagent config for a step ──
+  // ── gigaplan_step tool — get agent config for a step ──
   pi.registerTool({
     name: "gigaplan_step",
     label: "Gigaplan Step",
     description:
-      "Get the subagent configuration for a gigaplan step. Returns the task prompt, " +
-      "agent name, and output path. Use this before spawning a subagent for each step.",
+      "Get the agent configuration for a gigaplan step. Returns the task prompt, " +
+      "agent name, and output path. Use this before spawning an agent for each step.",
     parameters: Type.Object({
       planDir: Type.String({ description: "Path to the plan directory (.gigaplan/plans/<name>)" }),
       step: Type.String({ description: "Step to run: clarify, plan, critique, integrate, execute, review" }),
@@ -966,7 +974,7 @@ Start now with the **clarify** step.`;
               `**Agent:** ${config.agent}\n` +
               `**Output path:** ${config.outputPath}\n` +
               `**Tools:** ${config.tools}\n\n` +
-              `Spawn this as an autonomous subagent with the task below. ` +
+              `Spawn this via agent_group with the task below. ` +
               `After it completes, call gigaplan_advance with step="${params.step}".`,
           }],
           details: {
@@ -994,7 +1002,7 @@ Start now with the **clarify** step.`;
     label: "Gigaplan Advance",
     description:
       "Process a completed gigaplan step and advance the state machine. " +
-      "For LLM steps (clarify, plan, critique, integrate, execute, review): reads the output file written by the subagent. " +
+      "For LLM steps (clarify, plan, critique, integrate, execute, review): reads the output file written by the agent. " +
       "For logic steps (evaluate, gate): runs the logic directly.",
     parameters: Type.Object({
       planDir: Type.String({ description: "Path to the plan directory" }),
@@ -1017,7 +1025,7 @@ Start now with the **clarify** step.`;
         } else if (params.step === "gate") {
           result = runGate(params.planDir, state);
         } else {
-          // LLM step — read subagent output
+          // LLM step — read agent output
           const outputPath = path.join(params.planDir, `${params.step}_output.json`);
           const payload = parseStepOutput(params.step, outputPath);
           result = processStepOutput(
