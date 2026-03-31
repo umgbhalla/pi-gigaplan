@@ -665,20 +665,23 @@ export default function gigaplanExtension(pi: ExtensionAPI) {
       return;
     }
 
-    const theme = themeFor(ctx);
-    const statusWidth = 120;
-    ctx.ui.setStatus(
-      "gigaplan",
-      buildStatusText(activePlan, theme, statusWidth),
-    );
     if (ctx.ui.setWidget) {
+      ctx.ui.setStatus("gigaplan", undefined);
       ctx.ui.setWidget("gigaplan", (_tui: unknown, widgetTheme: Theme) => ({
         render(width: number) {
           return buildWidgetLines(activePlan!, widgetTheme, width);
         },
         invalidate() {},
       }));
+      return;
     }
+
+    const theme = themeFor(ctx);
+    const statusWidth = 120;
+    ctx.ui.setStatus(
+      "gigaplan",
+      buildStatusText(activePlan, theme, statusWidth),
+    );
   }
 
   async function showDoctorOverlay(result: ReturnType<typeof diagnosePlan>, ctx: any): Promise<string | null> {
