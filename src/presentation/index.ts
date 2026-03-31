@@ -3,6 +3,8 @@ import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+export * from "./step-details.js";
+
 import {
   type EvaluationResult,
   type FlagRecord,
@@ -600,3 +602,6 @@ export function scopedFocusViewModel(root: string, requestedPlanName?: string | 
     alternates: focused.alternates,
   });
 }
+
+export { createStepPanelRenderer } from "./step-panel.js";
+export type { StepPanelDetails } from "./step-panel.js";

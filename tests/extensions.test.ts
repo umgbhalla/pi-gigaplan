@@ -8,7 +8,9 @@ function createExtensionHarness() {
   const tools = new Map<string, any>();
   const commands = new Map<string, any>();
   const eventHandlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
-  const sentMessages: Array<{ message: string; options?: { deliverAs?: string } }> = [];
+  const messageRenderers = new Map<string, any>();
+  const sentUserMessages: Array<{ message: string; options?: { deliverAs?: string } }> = [];
+  const sentMessages: Array<{ message: any; options?: { deliverAs?: string; triggerTurn?: boolean } }> = [];
 
   gigaplanExtension({
     on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
@@ -22,12 +24,18 @@ function createExtensionHarness() {
     registerCommand(name: string, command: any) {
       commands.set(name, command);
     },
+    registerMessageRenderer(type: string, renderer: any) {
+      messageRenderers.set(type, renderer);
+    },
     sendUserMessage(message: string, options?: { deliverAs?: string }) {
+      sentUserMessages.push({ message, options });
+    },
+    sendMessage(message: any, options?: { deliverAs?: string; triggerTurn?: boolean }) {
       sentMessages.push({ message, options });
     },
   } as any);
 
-  return { tools, commands, eventHandlers, sentMessages };
+  return { tools, commands, eventHandlers, messageRenderers, sentUserMessages, sentMessages };
 }
 
 async function initPlan(root: string) {
@@ -83,9 +91,36 @@ describe("gigaplan orchestration", () => {
     expect(result.details?.error).toBeFalsy();
     expect(result.details?.planName).toBe("build-a-deployable-daemon");
     expect(result.details?.promptQueued).toBe(true);
-    expect(harness.sentMessages[0]?.message).toContain("Start now with the **clarify** step.");
-    expect(harness.sentMessages[0]?.options?.deliverAs).toBe("steer");
+    expect(harness.sentUserMessages[0]?.message).toContain("Start now with the **clarify** step.");
+    expect(harness.sentUserMessages[0]?.options?.deliverAs).toBe("steer");
+    expect(harness.sentMessages[0]?.message.customType).toBe("gigaplan-step");
+    expect(harness.sentMessages[0]?.message.details?.step).toBe("init");
     expect(fs.existsSync(path.join(root, ".gigaplan", "plans", "build-a-deployable-daemon", "state.json"))).toBe(true);
+  });
+
+  it("registers the gigaplan step renderer", () => {
+    const harness = createExtensionHarness();
+    expect(harness.messageRenderers.has("gigaplan-step")).toBe(true);
+  });
+
+  it("sends a custom step message after advance", async () => {
+    const { tools, planDir, sentMessages } = await initPlan(root);
+
+    fs.writeFileSync(
+      path.join(planDir, "clarify_output.json"),
+      JSON.stringify({
+        questions: [],
+        refined_idea: "Build a deployable daemon",
+        intent_summary: "Build a deployable daemon",
+      }, null, 2),
+    );
+
+    await tools.get("gigaplan_advance").execute("test", { planDir, step: "clarify", durationMs: 2500 });
+
+    expect(sentMessages.at(-1)?.message.customType).toBe("gigaplan-step");
+    expect(sentMessages.at(-1)?.message.details?.step).toBe("clarify");
+    expect(sentMessages.at(-1)?.message.details?.durationMs).toBe(2500);
+    expect(sentMessages.at(-1)?.options?.triggerTurn).toBe(false);
   });
 
   it("restores active plan status on session_start", async () => {
@@ -219,11 +254,12 @@ describe("gigaplan orchestration", () => {
   });
 
   it("advances through clarify, plan, critique, evaluate, and gate with expected next steps", async () => {
-    const { tools, planDir, sentMessages } = await initPlan(root);
+    const { tools, planDir, sentUserMessages, sentMessages } = await initPlan(root);
     const advance = tools.get("gigaplan_advance");
 
-    expect(sentMessages[0]?.message).toContain("Start now with the **clarify** step.");
-    expect(sentMessages[0]?.options?.deliverAs).toBe("steer");
+    expect(sentUserMessages[0]?.message).toContain("Start now with the **clarify** step.");
+    expect(sentUserMessages[0]?.options?.deliverAs).toBe("steer");
+    expect(sentMessages[0]?.message.details?.step).toBe("init");
 
     fs.writeFileSync(
       path.join(planDir, "clarify_output.json"),

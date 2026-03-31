@@ -80,6 +80,8 @@ import {
   resolveFocusedPlan,
   toolCallArg,
 } from "../src/presentation/index.js";
+import { GigaplanHeader } from "../src/presentation/header.js";
+import { createStepPanelRenderer, type StepPanelDetails } from "../src/presentation/step-panel.js";
 
 // ---------------------------------------------------------------------------
 // State machine: valid transitions
@@ -541,7 +543,11 @@ const VALID_ROBUSTNESS = new Set(["light", "standard", "thorough"]);
 
 export default function gigaplanExtension(pi: ExtensionAPI) {
 
+  pi.registerMessageRenderer("gigaplan-step", createStepPanelRenderer());
+
   let activePlan: GigaplanViewModel | null = null;
+  let header: GigaplanHeader | null = null;
+  let headerRegistered = false;
 
   function themeFor(ctx?: any): Theme | undefined {
     return (ctx?.ui as { theme?: Theme } | undefined)?.theme;
@@ -562,10 +568,36 @@ export default function gigaplanExtension(pi: ExtensionAPI) {
     });
   }
 
-  function syncActivePlan(root: string): void {
+  function updateHeader(ctx?: any): void {
+    if (!ctx?.ui?.setHeader) return;
+
+    if (!activePlan) {
+      header = null;
+      headerRegistered = false;
+      ctx.ui.setHeader(undefined);
+      return;
+    }
+
+    if (!headerRegistered) {
+      const viewModel = activePlan;
+      ctx.ui.setHeader((tui: any, theme: Theme) => {
+        const nextHeader = new GigaplanHeader(theme);
+        nextHeader.attachTui(tui);
+        nextHeader.setViewModel(viewModel);
+        header = nextHeader;
+        return nextHeader;
+      });
+      headerRegistered = true;
+    }
+
+    header?.setViewModel(activePlan);
+  }
+
+  function syncActivePlan(root: string, ctx?: any): void {
     const focused = resolveFocusedPlan(root);
     if (!focused || !isRenderableState(focused.state.current_state)) {
       activePlan = null;
+      updateHeader(ctx);
       return;
     }
     activePlan = buildViewModel(focused.planDir, focused.state, {
@@ -573,10 +605,60 @@ export default function gigaplanExtension(pi: ExtensionAPI) {
       focusIndex: focused.focusIndex,
       alternates: focused.alternates,
     });
+    updateHeader(ctx);
+  }
+
+  function buildStepMessageDetails(
+    root: string,
+    planDir: string,
+    state: PlanState,
+    result: StepResult,
+    durationMs?: number | null,
+    issues?: string[],
+    extraDetails: Record<string, unknown> = {},
+  ): StepPanelDetails {
+    const viewModel = buildViewModelForPlan(root, planDir, state, issues);
+    return {
+      ...extraDetails,
+      step: result.step,
+      planDir,
+      planName: state.name,
+      state: state.current_state,
+      version: state.iteration,
+      iteration: state.iteration,
+      duration: durationMs ?? undefined,
+      durationMs: durationMs ?? undefined,
+      summary: result.summary,
+      nextSteps: result.nextSteps,
+      stepResult: {
+        success: result.success,
+        step: result.step,
+        summary: result.summary,
+        nextSteps: result.nextSteps,
+        artifacts: result.artifacts,
+      },
+      viewModel,
+      recommendation: viewModel.recommendation ?? undefined,
+      confidence: viewModel.confidence ?? undefined,
+      score: viewModel.weightedScore ?? undefined,
+      delta: viewModel.scoreDelta ?? undefined,
+      verifiedFlags: viewModel.verifiedFlags,
+      openFlags: viewModel.openSignificant + viewModel.openMinor,
+    };
+  }
+
+  function sendStepMessage(details: StepPanelDetails): void {
+    pi.sendMessage({
+      customType: "gigaplan-step",
+      content: details.summary ?? ((details.stepResult as Record<string, unknown> | undefined)?.summary as string | undefined) ?? details.step ?? "step",
+      display: true,
+      details,
+    }, { triggerTurn: false });
   }
 
   function updateWidget(ctx?: any) {
     if (!ctx?.ui) return;
+    updateHeader(ctx);
     if (!activePlan) {
       ctx.ui.setStatus("gigaplan", undefined);
       ctx.ui.setWidget?.("gigaplan", undefined);
@@ -729,6 +811,25 @@ Start now with the **clarify** step.`;
 
     activePlan = buildViewModelForPlan(root, planDir, state);
     updateWidget(ctx);
+    sendStepMessage({
+      step: "init",
+      planDir,
+      planName: state.name,
+      state: state.current_state,
+      version: state.iteration,
+      iteration: state.iteration,
+      duration: undefined,
+      durationMs: undefined,
+      summary: `Initialized plan ${state.name}`,
+      nextSteps: ["clarify"],
+      stepResult: {
+        success: true,
+        step: "init",
+        summary: `Initialized plan ${state.name}`,
+        nextSteps: ["clarify"],
+      },
+      viewModel: activePlan,
+    });
     ctx?.ui?.notify?.(`Plan "${state.name}" initialized. Starting orchestration...`, "info");
 
     return {
@@ -854,12 +955,12 @@ Start now with the **clarify** step.`;
   }
 
   pi.on("session_start", (_event, ctx) => {
-    syncActivePlan(ctx.cwd);
+    syncActivePlan(ctx.cwd, ctx);
     updateWidget(ctx);
   });
 
   pi.on("session_switch", (_event, ctx) => {
-    syncActivePlan(ctx.cwd);
+    syncActivePlan(ctx.cwd, ctx);
     updateWidget(ctx);
   });
 
@@ -991,7 +1092,7 @@ Start now with the **clarify** step.`;
 
         if (selectedAction === "fix") {
           const fixed = diagnosePlan(ctx.cwd, requested, true);
-          syncActivePlan(ctx.cwd);
+          syncActivePlan(ctx.cwd, ctx);
           updateWidget(ctx);
           ctx.ui.notify(fixed.fixes.length > 0 ? `Gigaplan doctor fixed ${fixed.fixes.length} issue(s)` : "Gigaplan doctor found nothing to fix", fixed.fixes.length > 0 ? "info" : "warning");
           pi.sendUserMessage([
@@ -1016,7 +1117,7 @@ Start now with the **clarify** step.`;
           result.state.current_state = STATE_ABORTED;
           result.state.history.push({ step: "override", timestamp: nowUtc(), message: "aborted via doctor" });
           savePlanState(result.planDir, result.state);
-          syncActivePlan(ctx.cwd);
+          syncActivePlan(ctx.cwd, ctx);
           updateWidget(ctx);
           ctx.ui.notify(`Plan \"${result.state.name}\" aborted`, "warning");
           return;
@@ -1042,7 +1143,7 @@ Start now with the **clarify** step.`;
     async execute(_id, params, _signal, _onUpdate, ctx) {
       try {
         const result = diagnosePlan(ctx.cwd, params.planName, params.fix ?? false);
-        syncActivePlan(ctx.cwd);
+        syncActivePlan(ctx.cwd, ctx);
         updateWidget(ctx);
 
         const lines = [
@@ -1118,7 +1219,7 @@ Start now with the **clarify** step.`;
         requireAllowedStep(state, params.step);
         const config = buildStepConfig(params.step, state, params.planDir);
         const root = ctx?.cwd ?? state.config.project_dir ?? process.cwd();
-        syncActivePlan(root);
+        syncActivePlan(root, ctx);
         updateWidget(ctx);
 
         return {
@@ -1186,6 +1287,7 @@ Start now with the **clarify** step.`;
         requireAllowedStep(state, params.step);
 
         let result: StepResult;
+        let stepPayload: Record<string, unknown> = {};
 
         if (params.step === "evaluate") {
           result = runEvaluate(params.planDir, state);
@@ -1194,6 +1296,7 @@ Start now with the **clarify** step.`;
         } else {
           const outputPath = path.join(params.planDir, `${params.step}_output.json`);
           const payload = parseStepOutput(params.step, outputPath);
+          stepPayload = payload;
           result = processStepOutput(
             params.step,
             params.planDir,
@@ -1204,8 +1307,28 @@ Start now with the **clarify** step.`;
         }
 
         const persistedState = readJson(path.join(params.planDir, "state.json")) as PlanState;
-        syncActivePlan(widgetRoot);
+        if (params.step === "evaluate") {
+          stepPayload = { ...(persistedState.last_evaluation as Record<string, unknown>) };
+        } else if (params.step === "gate") {
+          try {
+            stepPayload = readJson(path.join(params.planDir, "gate.json")) as Record<string, unknown>;
+          } catch {
+            stepPayload = {};
+          }
+        }
+        syncActivePlan(widgetRoot, ctx);
         updateWidget(ctx);
+
+        const stepDetails = buildStepMessageDetails(
+          widgetRoot,
+          params.planDir,
+          persistedState,
+          result,
+          params.durationMs ?? null,
+          undefined,
+          stepPayload,
+        );
+        sendStepMessage(stepDetails);
 
         const nextAction = result.nextSteps.length > 0
           ? `\n\n**Next step(s):** ${result.nextSteps.join(", ")}`
@@ -1225,7 +1348,7 @@ Start now with the **clarify** step.`;
             planDir: params.planDir,
             planName: persistedState.name,
             state: persistedState.current_state,
-            viewModel: buildViewModelForPlan(widgetRoot, params.planDir, persistedState),
+            viewModel: stepDetails.viewModel,
           },
         };
       } catch (e) {
@@ -1245,7 +1368,7 @@ Start now with the **clarify** step.`;
         } catch {
           // ignore secondary diagnosis failures
         }
-        syncActivePlan(widgetRoot);
+        syncActivePlan(widgetRoot, ctx);
         updateWidget(ctx);
         return {
           content: [{
@@ -1307,7 +1430,7 @@ Start now with the **clarify** step.`;
         const registry = loadFlagRegistry(planDir);
         const unresolved = unresolvedSignificantFlags(registry);
         const nextSteps = inferNextSteps(state);
-        syncActivePlan(root);
+        syncActivePlan(root, ctx);
         updateWidget(ctx);
 
         const lines = [
@@ -1333,7 +1456,7 @@ Start now with the **clarify** step.`;
       }
 
       const focused = resolveFocusedPlan(root);
-      syncActivePlan(root);
+      syncActivePlan(root, ctx);
       updateWidget(ctx);
 
       const lines = dirs.map((d) => {
@@ -1396,7 +1519,7 @@ Start now with the **clarify** step.`;
               message: `add-note: ${params.note}`,
             });
             savePlanState(params.planDir, state);
-            syncActivePlan(root);
+            syncActivePlan(root, ctx);
             updateWidget(ctx);
             return {
               content: [{ type: "text", text: `Note added. Continue with the current step.` }],
@@ -1408,7 +1531,7 @@ Start now with the **clarify** step.`;
             state.current_state = STATE_ABORTED;
             state.history.push({ step: "override", timestamp: nowUtc(), message: "aborted" });
             savePlanState(params.planDir, state);
-            syncActivePlan(root);
+            syncActivePlan(root, ctx);
             updateWidget(ctx);
             return {
               content: [{ type: "text", text: `Plan "${state.name}" aborted.` }],
@@ -1426,7 +1549,7 @@ Start now with the **clarify** step.`;
               message: "force-proceed (bypassed gate)",
             });
             savePlanState(params.planDir, state);
-            syncActivePlan(root);
+            syncActivePlan(root, ctx);
             updateWidget(ctx);
             return {
               content: [{ type: "text", text: "Force-proceeded to gate. Next step: execute." }],
@@ -1444,7 +1567,7 @@ Start now with the **clarify** step.`;
               message: "skip (user override to SKIP)",
             });
             savePlanState(params.planDir, state);
-            syncActivePlan(root);
+            syncActivePlan(root, ctx);
             updateWidget(ctx);
             return {
               content: [{ type: "text", text: "Skipped to gate. Next step: gate." }],
