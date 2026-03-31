@@ -5,9 +5,10 @@
  * Registers /gigaplan command and gigaplan_status tool.
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, Theme } from "@mariozechner/pi-coding-agent";
+import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { Text } from "@mariozechner/pi-tui";
+import { Container, Key, SelectList, Text, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -42,7 +43,6 @@ import {
   schemasRoot,
   activePlanDirs,
   resolvePlanDir,
-  loadPlan,
   savePlanState,
   latestPlanRecord,
   latestPlanPath,
@@ -63,6 +63,23 @@ import {
   validatePayload,
   sessionKeyFor,
 } from "../src/workers.js";
+import {
+  type GigaplanViewModel,
+  buildStatusText,
+  buildViewModel,
+  buildWidgetLines,
+  compactIdea,
+  describeIssues,
+  formatAdvanceResult,
+  formatDoctorResult,
+  formatInitResult,
+  formatOverrideResult,
+  formatStatusResult,
+  formatStepResult,
+  isRenderableState,
+  resolveFocusedPlan,
+  toolCallArg,
+} from "../src/presentation/index.js";
 
 // ---------------------------------------------------------------------------
 // State machine: valid transitions
@@ -524,36 +541,124 @@ const VALID_ROBUSTNESS = new Set(["light", "standard", "thorough"]);
 
 export default function gigaplanExtension(pi: ExtensionAPI) {
 
-  // Widget state
-  let activePlan: { name: string; state: string; step: string } | null = null;
+  let activePlan: GigaplanViewModel | null = null;
+
+  function themeFor(ctx?: any): Theme | undefined {
+    return (ctx?.ui as { theme?: Theme } | undefined)?.theme;
+  }
+
+  function buildViewModelForPlan(root: string, planDir: string, state: PlanState, issues?: string[]): GigaplanViewModel {
+    let focused = null as ReturnType<typeof resolveFocusedPlan>;
+    try {
+      focused = resolveFocusedPlan(root, state.name);
+    } catch {
+      focused = null;
+    }
+    return buildViewModel(planDir, state, {
+      totalPlans: focused?.totalPlans ?? 1,
+      focusIndex: focused?.focusIndex ?? 1,
+      alternates: focused?.alternates ?? [],
+      issues,
+    });
+  }
 
   function syncActivePlan(root: string): void {
-    try {
-      const [, state] = loadPlan(root);
-      if (TERMINAL_STATES.has(state.current_state)) {
-        activePlan = null;
-        return;
-      }
-      activePlan = {
-        name: state.name,
-        state: state.current_state,
-        step: inferNextSteps(state)[0] ?? "done",
-      };
-    } catch {
+    const focused = resolveFocusedPlan(root);
+    if (!focused || !isRenderableState(focused.state.current_state)) {
       activePlan = null;
+      return;
     }
+    activePlan = buildViewModel(focused.planDir, focused.state, {
+      totalPlans: focused.totalPlans,
+      focusIndex: focused.focusIndex,
+      alternates: focused.alternates,
+    });
   }
 
   function updateWidget(ctx?: any) {
     if (!ctx?.ui) return;
     if (!activePlan) {
       ctx.ui.setStatus("gigaplan", undefined);
+      ctx.ui.setWidget?.("gigaplan", undefined);
       return;
     }
+
+    const theme = themeFor(ctx);
+    const statusWidth = 120;
     ctx.ui.setStatus(
       "gigaplan",
-      `📋 ${activePlan.name} [${activePlan.state}] → ${activePlan.step}`,
+      buildStatusText(activePlan, theme, statusWidth),
     );
+    if (ctx.ui.setWidget) {
+      ctx.ui.setWidget("gigaplan", (_tui: unknown, widgetTheme: Theme) => ({
+        render(width: number) {
+          return buildWidgetLines(activePlan!, widgetTheme, width);
+        },
+        invalidate() {},
+      }));
+    }
+  }
+
+  async function showDoctorOverlay(result: ReturnType<typeof diagnosePlan>, ctx: any): Promise<string | null> {
+    if (!ctx?.ui?.custom) return null;
+
+    const items = [
+      { value: "fix", label: "Fix JSON", description: "Normalize the next step output when a safe repair exists" },
+      { value: "respawn", label: "Respawn agent", description: "Use the next-step config to rerun the current agent step" },
+      { value: "abort", label: "Abort plan", description: "Mark the focused plan as aborted" },
+    ];
+
+    return ctx.ui.custom((tui: any, overlayTheme: Theme, _kb: unknown, done: (result: string | null) => void) => {
+      const container = new Container();
+      container.addChild(new DynamicBorder((str) => overlayTheme.fg("accent", str)));
+
+      const viewModel = buildViewModelForPlan(ctx.cwd, result.planDir, result.state, result.issues);
+      const planInfo = new Text(
+        `${overlayTheme.bold(viewModel.name)}  ${overlayTheme.fg(viewModel.stateColor, viewModel.state)}${overlayTheme.fg("dim", " → ")}${overlayTheme.fg("accent", viewModel.nextStep ?? "done")}`,
+        1,
+        0,
+      );
+      container.addChild(planInfo);
+
+      const issueLines = result.issues.length === 0
+        ? `${overlayTheme.fg("success", "✓")} ${overlayTheme.fg("text", "No issues detected")}`
+        : [
+            `${overlayTheme.fg("dim", `Issues (${result.issues.length}):`)}`,
+            ...result.issues.map((issue) => `  ${overlayTheme.fg("warning", "●")} ${overlayTheme.fg("text", issue)}`),
+          ].join("\n");
+      container.addChild(new Text(issueLines, 1, 0));
+
+      const selectList = new SelectList(items, items.length, {
+        selectedPrefix: (text) => overlayTheme.fg("accent", text),
+        selectedText: (text) => overlayTheme.fg("accent", text),
+        description: (text) => overlayTheme.fg("muted", text),
+        scrollInfo: (text) => overlayTheme.fg("dim", text),
+        noMatch: (text) => overlayTheme.fg("warning", text),
+      });
+
+      selectList.onSelect = (item) => done(item.value);
+      selectList.onCancel = () => done(null);
+      container.addChild(selectList);
+      container.addChild(new Text(overlayTheme.fg("dim", "↑↓ navigate · enter select · esc cancel"), 1, 0));
+      container.addChild(new DynamicBorder((str) => overlayTheme.fg("accent", str)));
+
+      return {
+        render(width: number) {
+          return container.render(width);
+        },
+        invalidate() {
+          container.invalidate();
+        },
+        handleInput(data: string) {
+          if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+            done(null);
+            return;
+          }
+          selectList.handleInput(data);
+          tui.requestRender();
+        },
+      };
+    }, { overlay: true });
   }
 
   function buildOrchestrationPrompt(args: {
@@ -622,7 +727,7 @@ Start now with the **clarify** step.`;
       autoApprove,
     });
 
-    activePlan = { name: state.name, state: state.current_state, step: "clarify" };
+    activePlan = buildViewModelForPlan(root, planDir, state);
     updateWidget(ctx);
     ctx?.ui?.notify?.(`Plan "${state.name}" initialized. Starting orchestration...`, "info");
 
@@ -854,14 +959,24 @@ Start now with the **clarify** step.`;
             autoApprove: resolvedAutoApprove,
             nextStep: "clarify",
             promptQueued: startOrchestration,
+            viewModel: buildViewModelForPlan(ctx.cwd, planDir, state),
           },
         };
       } catch (e) {
         return {
           content: [{ type: "text", text: `Error initializing gigaplan: ${e instanceof Error ? e.message : String(e)}` }],
-          details: { error: true } as any,
+          details: { error: true, message: e instanceof Error ? e.message : String(e) } as any,
         };
       }
+    },
+
+    renderCall(args, theme) {
+      return new Text(toolCallArg("gigaplan_init", compactIdea(args.idea), theme), 0, 0);
+    },
+
+    renderResult(result, { expanded, isPartial }, theme) {
+      if (isPartial) return new Text(theme.fg("dim", "Processing..."), 0, 0);
+      return new Text(formatInitResult((result.details ?? {}) as Record<string, unknown>, expanded, theme), 0, 0);
     },
   });
 
@@ -872,19 +987,42 @@ Start now with the **clarify** step.`;
       try {
         const requested = (args ?? "").trim() || undefined;
         const result = diagnosePlan(ctx.cwd, requested, false);
-        const lines = [
-          `Plan: ${result.state.name}`,
-          `State: ${result.state.current_state}`,
-          `Robustness: ${result.state.config.robustness ?? "standard"}`,
-          `Next step: ${result.nextStep ?? "done"}`,
-          result.issues.length === 0 ? "Doctor: no problems detected." : `Doctor found ${result.issues.length} issue(s):`,
-          ...result.issues.map((issue) => `- ${issue}`),
-        ];
-        if (result.nextStepConfig) {
-          lines.push(`Recovery: regenerate agent for \`${result.nextStep}\` via gigaplan_step or use doctor tool details.`);
+        const selectedAction = await showDoctorOverlay(result, ctx);
+
+        if (selectedAction === "fix") {
+          const fixed = diagnosePlan(ctx.cwd, requested, true);
+          syncActivePlan(ctx.cwd);
+          updateWidget(ctx);
+          ctx.ui.notify(fixed.fixes.length > 0 ? `Gigaplan doctor fixed ${fixed.fixes.length} issue(s)` : "Gigaplan doctor found nothing to fix", fixed.fixes.length > 0 ? "info" : "warning");
+          pi.sendUserMessage([
+            `Gigaplan doctor repaired **${fixed.state.name}**.`,
+            fixed.fixes.length > 0 ? `Fixes: ${fixed.fixes.join(" · ")}` : "No automatic fixes applied.",
+            fixed.nextStepConfig ? `Respawn: ${fixed.nextStep}` : "",
+          ].filter(Boolean).join("\n"), { deliverAs: "steer" });
+          return;
         }
+
+        if (selectedAction === "respawn") {
+          ctx.ui.notify(result.nextStepConfig ? `Use gigaplan_step or tool details to respawn ${result.nextStep}` : "No next-step config available", result.nextStepConfig ? "info" : "warning");
+          pi.sendUserMessage([
+            `Doctor summary for **${result.state.name}**`,
+            result.issues.length > 0 ? result.issues.map((issue) => `- ${issue}`).join("\n") : "- No issues detected",
+            result.nextStepConfig ? `Respawn next step: ${result.nextStep}` : "",
+          ].filter(Boolean).join("\n"), { deliverAs: "steer" });
+          return;
+        }
+
+        if (selectedAction === "abort") {
+          result.state.current_state = STATE_ABORTED;
+          result.state.history.push({ step: "override", timestamp: nowUtc(), message: "aborted via doctor" });
+          savePlanState(result.planDir, result.state);
+          syncActivePlan(ctx.cwd);
+          updateWidget(ctx);
+          ctx.ui.notify(`Plan \"${result.state.name}\" aborted`, "warning");
+          return;
+        }
+
         ctx.ui.notify(result.issues.length === 0 ? "Gigaplan doctor: no issues found" : "Gigaplan doctor found issues", result.issues.length === 0 ? "info" : "warning");
-        pi.sendUserMessage(lines.join("\n"), { deliverAs: "followUp" });
       } catch (e) {
         ctx.ui.notify(`Gigaplan doctor failed: ${e instanceof Error ? e.message : String(e)}`, "error");
       }
@@ -904,6 +1042,9 @@ Start now with the **clarify** step.`;
     async execute(_id, params, _signal, _onUpdate, ctx) {
       try {
         const result = diagnosePlan(ctx.cwd, params.planName, params.fix ?? false);
+        syncActivePlan(ctx.cwd);
+        updateWidget(ctx);
+
         const lines = [
           `# Gigaplan Doctor`,
           `**Plan:** ${result.state.name}`,
@@ -934,14 +1075,25 @@ Start now with the **clarify** step.`;
             issues: result.issues,
             fixes: result.fixes,
             nextStepConfig: result.nextStepConfig,
+            viewModel: buildViewModelForPlan(ctx.cwd, result.planDir, result.state, result.issues),
           },
         };
       } catch (e) {
         return {
           content: [{ type: "text", text: `Error running doctor: ${e instanceof Error ? e.message : String(e)}` }],
-          details: { error: true } as any,
+          details: { error: true, message: e instanceof Error ? e.message : String(e) } as any,
         };
       }
+    },
+
+    renderCall(args, theme) {
+      const suffix = args.fix ? "--fix" : args.planName ?? "";
+      return new Text(toolCallArg("gigaplan_doctor", suffix, theme), 0, 0);
+    },
+
+    renderResult(result, { expanded, isPartial }, theme) {
+      if (isPartial) return new Text(theme.fg("dim", "Processing..."), 0, 0);
+      return new Text(formatDoctorResult((result.details ?? {}) as Record<string, unknown>, expanded, theme), 0, 0);
     },
   });
 
@@ -957,7 +1109,7 @@ Start now with the **clarify** step.`;
       step: Type.String({ description: "Step to run: clarify, plan, critique, integrate, execute, review" }),
     }),
 
-    async execute(_id, params) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       try {
         const state = readJson(path.join(params.planDir, "state.json")) as PlanState;
         if (!LLM_STEPS.has(params.step)) {
@@ -965,6 +1117,9 @@ Start now with the **clarify** step.`;
         }
         requireAllowedStep(state, params.step);
         const config = buildStepConfig(params.step, state, params.planDir);
+        const root = ctx?.cwd ?? state.config.project_dir ?? process.cwd();
+        syncActivePlan(root);
+        updateWidget(ctx);
 
         return {
           content: [{
@@ -978,6 +1133,7 @@ Start now with the **clarify** step.`;
               `After it completes, call gigaplan_advance with step="${params.step}".`,
           }],
           details: {
+            step: params.step,
             name: config.name,
             agent: config.agent,
             task: config.task,
@@ -985,14 +1141,24 @@ Start now with the **clarify** step.`;
             tools: config.tools,
             outputPath: config.outputPath,
             interactive: false,
+            viewModel: buildViewModelForPlan(root, params.planDir, state),
           },
         };
       } catch (e) {
         return {
           content: [{ type: "text", text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
-          details: { error: true } as any,
+          details: { error: true, message: e instanceof Error ? e.message : String(e), step: params.step } as any,
         };
       }
+    },
+
+    renderCall(args, theme) {
+      return new Text(toolCallArg("gigaplan_step", args.step, theme), 0, 0);
+    },
+
+    renderResult(result, { expanded, isPartial }, theme) {
+      if (isPartial) return new Text(theme.fg("dim", "Processing..."), 0, 0);
+      return new Text(formatStepResult((result.details ?? {}) as Record<string, unknown>, expanded, theme), 0, 0);
     },
   });
 
@@ -1011,6 +1177,7 @@ Start now with the **clarify** step.`;
     }),
 
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      const widgetRoot = ctx?.cwd ?? process.cwd();
       try {
         const state = readJson(path.join(params.planDir, "state.json")) as PlanState;
         if (!LLM_STEPS.has(params.step) && !LOGIC_STEPS.has(params.step)) {
@@ -1025,7 +1192,6 @@ Start now with the **clarify** step.`;
         } else if (params.step === "gate") {
           result = runGate(params.planDir, state);
         } else {
-          // LLM step — read agent output
           const outputPath = path.join(params.planDir, `${params.step}_output.json`);
           const payload = parseStepOutput(params.step, outputPath);
           result = processStepOutput(
@@ -1037,9 +1203,7 @@ Start now with the **clarify** step.`;
           );
         }
 
-        // Update widget from persisted plan state so it reflects the real state,
-        // not just the step that most recently ran.
-        const widgetRoot = ctx?.cwd ?? state.config.project_dir ?? process.cwd();
+        const persistedState = readJson(path.join(params.planDir, "state.json")) as PlanState;
         syncActivePlan(widgetRoot);
         updateWidget(ctx);
 
@@ -1058,18 +1222,48 @@ Start now with the **clarify** step.`;
             summary: result.summary,
             nextSteps: result.nextSteps,
             artifacts: result.artifacts,
+            planDir: params.planDir,
+            planName: persistedState.name,
+            state: persistedState.current_state,
+            viewModel: buildViewModelForPlan(widgetRoot, params.planDir, persistedState),
           },
         };
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
+        let recoveryDetails: Record<string, unknown> = { error: true, doctorSuggested: true, step: params.step, message };
+        try {
+          const fallbackState = readJson(path.join(params.planDir, "state.json")) as PlanState;
+          const diagnosis = diagnosePlan(widgetRoot, fallbackState.name, false);
+          recoveryDetails = {
+            ...recoveryDetails,
+            planDir: params.planDir,
+            planName: fallbackState.name,
+            state: fallbackState.current_state,
+            issues: diagnosis.issues,
+            recovery: buildViewModelForPlan(widgetRoot, params.planDir, fallbackState, diagnosis.issues).recovery,
+          };
+        } catch {
+          // ignore secondary diagnosis failures
+        }
+        syncActivePlan(widgetRoot);
+        updateWidget(ctx);
         return {
           content: [{
             type: "text",
             text: `Error advancing: ${message}\n\nRun \`gigaplan_doctor({ fix: true })\` to validate the plan, repair common JSON issues, and regenerate the next-step handoff.`,
           }],
-          details: { error: true, doctorSuggested: true } as any,
+          details: recoveryDetails as any,
         };
       }
+    },
+
+    renderCall(args, theme) {
+      return new Text(toolCallArg("gigaplan_advance", args.step, theme), 0, 0);
+    },
+
+    renderResult(result, { expanded, isPartial }, theme) {
+      if (isPartial) return new Text(theme.fg("dim", "Processing..."), 0, 0);
+      return new Text(formatAdvanceResult((result.details ?? {}) as Record<string, unknown>, expanded, theme), 0, 0);
     },
   });
 
@@ -1113,6 +1307,8 @@ Start now with the **clarify** step.`;
         const registry = loadFlagRegistry(planDir);
         const unresolved = unresolvedSignificantFlags(registry);
         const nextSteps = inferNextSteps(state);
+        syncActivePlan(root);
+        updateWidget(ctx);
 
         const lines = [
           `# Plan: ${state.name}`,
@@ -1127,11 +1323,19 @@ Start now with the **clarify** step.`;
 
         return {
           content: [{ type: "text", text: lines.join("\n") }],
-          details: { state, planDir },
+          details: {
+            state,
+            planDir,
+            planName: state.name,
+            viewModel: buildViewModelForPlan(root, planDir, state),
+          },
         };
       }
 
-      // List all plans
+      const focused = resolveFocusedPlan(root);
+      syncActivePlan(root);
+      updateWidget(ctx);
+
       const lines = dirs.map((d) => {
         const s = readJson(path.join(d, "state.json")) as PlanState;
         const next = inferNextSteps(s);
@@ -1140,8 +1344,24 @@ Start now with the **clarify** step.`;
 
       return {
         content: [{ type: "text", text: `## Gigaplan Plans\n\n${lines.join("\n")}` }],
-        details: { plans: dirs.map((d) => path.basename(d)) },
+        details: {
+          plans: dirs.map((d) => path.basename(d)),
+          viewModel: focused ? buildViewModel(focused.planDir, focused.state, {
+            totalPlans: focused.totalPlans,
+            focusIndex: focused.focusIndex,
+            alternates: focused.alternates,
+          }) : undefined,
+        },
       };
+    },
+
+    renderCall(args, theme) {
+      return new Text(toolCallArg("gigaplan_status", args.planName ?? "", theme), 0, 0);
+    },
+
+    renderResult(result, { expanded, isPartial }, theme) {
+      if (isPartial) return new Text(theme.fg("dim", "Processing..."), 0, 0);
+      return new Text(formatStatusResult((result.details ?? {}) as Record<string, unknown>, expanded, theme), 0, 0);
     },
   });
 
@@ -1156,14 +1376,15 @@ Start now with the **clarify** step.`;
       note: Type.Optional(Type.String({ description: "Note text (for add-note action)" })),
     }),
 
-    async execute(_id, params) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       try {
         const state = readJson(path.join(params.planDir, "state.json")) as PlanState;
+        const root = ctx?.cwd ?? state.config.project_dir ?? process.cwd();
 
         switch (params.action) {
           case "add-note": {
             if (!params.note) {
-              return { content: [{ type: "text", text: "Error: note text required for add-note" }], details: {} };
+              return { content: [{ type: "text", text: "Error: note text required for add-note" }], details: { error: true, action: params.action } };
             }
             state.meta.notes = [
               ...(state.meta.notes ?? []),
@@ -1175,14 +1396,24 @@ Start now with the **clarify** step.`;
               message: `add-note: ${params.note}`,
             });
             savePlanState(params.planDir, state);
-            return { content: [{ type: "text", text: `Note added. Continue with the current step.` }], details: {} };
+            syncActivePlan(root);
+            updateWidget(ctx);
+            return {
+              content: [{ type: "text", text: `Note added. Continue with the current step.` }],
+              details: { action: params.action, planDir: params.planDir, viewModel: buildViewModelForPlan(root, params.planDir, state) },
+            };
           }
 
           case "abort": {
             state.current_state = STATE_ABORTED;
             state.history.push({ step: "override", timestamp: nowUtc(), message: "aborted" });
             savePlanState(params.planDir, state);
-            return { content: [{ type: "text", text: `Plan "${state.name}" aborted.` }], details: {} };
+            syncActivePlan(root);
+            updateWidget(ctx);
+            return {
+              content: [{ type: "text", text: `Plan "${state.name}" aborted.` }],
+              details: { action: params.action, planDir: params.planDir, viewModel: buildViewModelForPlan(root, params.planDir, state) },
+            };
           }
 
           case "force-proceed": {
@@ -1195,9 +1426,11 @@ Start now with the **clarify** step.`;
               message: "force-proceed (bypassed gate)",
             });
             savePlanState(params.planDir, state);
+            syncActivePlan(root);
+            updateWidget(ctx);
             return {
               content: [{ type: "text", text: "Force-proceeded to gate. Next step: execute." }],
-              details: { nextSteps: ["execute"] } as any,
+              details: { action: params.action, nextSteps: ["execute"], planDir: params.planDir, viewModel: buildViewModelForPlan(root, params.planDir, state) } as any,
             };
           }
 
@@ -1211,24 +1444,35 @@ Start now with the **clarify** step.`;
               message: "skip (user override to SKIP)",
             });
             savePlanState(params.planDir, state);
+            syncActivePlan(root);
+            updateWidget(ctx);
             return {
               content: [{ type: "text", text: "Skipped to gate. Next step: gate." }],
-              details: { nextSteps: ["gate"] } as any,
+              details: { action: params.action, nextSteps: ["gate"], planDir: params.planDir, viewModel: buildViewModelForPlan(root, params.planDir, state) } as any,
             };
           }
 
           default:
             return {
               content: [{ type: "text", text: `Unknown action: ${params.action}. Use: add-note, abort, force-proceed, skip` }],
-              details: {},
+              details: { error: true, action: params.action },
             };
         }
       } catch (e) {
         return {
           content: [{ type: "text", text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
-          details: { error: true } as any,
+          details: { error: true, action: params.action, message: e instanceof Error ? e.message : String(e) } as any,
         };
       }
+    },
+
+    renderCall(args, theme) {
+      return new Text(toolCallArg("gigaplan_override", args.action, theme), 0, 0);
+    },
+
+    renderResult(result, { expanded, isPartial }, theme) {
+      if (isPartial) return new Text(theme.fg("dim", "Processing..."), 0, 0);
+      return new Text(formatOverrideResult((result.details ?? {}) as Record<string, unknown>, expanded, theme), 0, 0);
     },
   });
 }

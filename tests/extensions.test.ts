@@ -84,7 +84,7 @@ describe("gigaplan orchestration", () => {
     expect(result.details?.planName).toBe("build-a-deployable-daemon");
     expect(result.details?.promptQueued).toBe(true);
     expect(harness.sentMessages[0]?.message).toContain("Start now with the **clarify** step.");
-    expect(harness.sentMessages[0]?.options?.deliverAs).toBe("followUp");
+    expect(harness.sentMessages[0]?.options?.deliverAs).toBe("steer");
     expect(fs.existsSync(path.join(root, ".gigaplan", "plans", "build-a-deployable-daemon", "state.json"))).toBe(true);
   });
 
@@ -159,8 +159,9 @@ describe("gigaplan orchestration", () => {
 
     expect(result.details?.error).toBeFalsy();
     expect(setStatusCalls.at(-1)?.key).toBe("gigaplan");
-    expect(setStatusCalls.at(-1)?.text).toContain("[clarified] → plan");
-    expect(setStatusCalls.at(-1)?.text).not.toContain("[clarify]");
+    expect(setStatusCalls.at(-1)?.text).toContain("clarified");
+    expect(setStatusCalls.at(-1)?.text).toContain("→ plan");
+    expect(setStatusCalls.at(-1)?.text).not.toContain("→ clarify");
   });
 
   it("guides critique subagents toward the required flags schema", async () => {
@@ -222,7 +223,7 @@ describe("gigaplan orchestration", () => {
     const advance = tools.get("gigaplan_advance");
 
     expect(sentMessages[0]?.message).toContain("Start now with the **clarify** step.");
-    expect(sentMessages[0]?.options?.deliverAs).toBe("followUp");
+    expect(sentMessages[0]?.options?.deliverAs).toBe("steer");
 
     fs.writeFileSync(
       path.join(planDir, "clarify_output.json"),
