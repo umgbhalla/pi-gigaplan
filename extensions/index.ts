@@ -788,7 +788,7 @@ Start now with the **clarify** step.`;
         ctx,
       );
 
-      pi.sendUserMessage(orchestrationPrompt, { deliverAs: "followUp" });
+      pi.sendUserMessage(orchestrationPrompt, { deliverAs: "steer" });
     },
   });
 
@@ -836,7 +836,7 @@ Start now with the **clarify** step.`;
 
         const startOrchestration = params.startOrchestration ?? true;
         if (startOrchestration) {
-          pi.sendUserMessage(orchestrationPrompt, { deliverAs: "followUp" });
+          pi.sendUserMessage(orchestrationPrompt, { deliverAs: "steer" });
         }
 
         return {
