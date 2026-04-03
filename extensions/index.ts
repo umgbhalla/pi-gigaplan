@@ -656,15 +656,30 @@ export default function gigaplanExtension(pi: ExtensionAPI) {
     }, { triggerTurn: false });
   }
 
+  /**
+   * Check if a plan directory is owned by (contained within) the current working directory.
+   * Uses proper path resolution to avoid false positives from prefix matches
+   * (e.g., /projects/A2 should NOT be considered inside /projects/A).
+   */
+  function isPlanOwnedByCwd(planDir: string, cwd: string): boolean {
+    const resolvedPlanDir = path.resolve(planDir);
+    const resolvedCwd = path.resolve(cwd);
+    const rel = path.relative(resolvedCwd, resolvedPlanDir);
+    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  }
+
   function updateWidget(ctx?: any) {
     if (!ctx?.ui) return;
-    updateHeader(ctx);
-    // Only show plan if it belongs to current directory
-    if (!activePlan || !activePlan.planDir.startsWith(ctx.cwd)) {
+    // Only show/update header if plan belongs to current directory
+    if (!activePlan || !isPlanOwnedByCwd(activePlan.planDir, ctx.cwd)) {
       ctx.ui.setStatus("gigaplan", undefined);
       ctx.ui.setWidget?.("gigaplan", undefined);
+      updateHeader(ctx);
       return;
     }
+
+
+    updateHeader(ctx);
 
     if (ctx.ui.setWidget) {
       ctx.ui.setStatus("gigaplan", undefined);
@@ -970,7 +985,7 @@ Start now with the **clarify** step.`;
 
   pi.on("session_shutdown", (_event, ctx) => {
     // Only clear if the shutting down session owns the active plan
-    if (activePlan?.planDir?.startsWith(ctx.cwd)) {
+    if (activePlan && isPlanOwnedByCwd(activePlan.planDir, ctx.cwd)) {
       activePlan = null;
     }
     updateWidget(ctx);
