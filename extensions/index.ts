@@ -659,7 +659,8 @@ export default function gigaplanExtension(pi: ExtensionAPI) {
   function updateWidget(ctx?: any) {
     if (!ctx?.ui) return;
     updateHeader(ctx);
-    if (!activePlan) {
+    // Only show plan if it belongs to current directory
+    if (!activePlan || !activePlan.planDir.startsWith(ctx.cwd)) {
       ctx.ui.setStatus("gigaplan", undefined);
       ctx.ui.setWidget?.("gigaplan", undefined);
       return;
@@ -968,7 +969,10 @@ Start now with the **clarify** step.`;
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
-    activePlan = null;
+    // Only clear if the shutting down session owns the active plan
+    if (activePlan?.planDir?.startsWith(ctx.cwd)) {
+      activePlan = null;
+    }
     updateWidget(ctx);
   });
 
